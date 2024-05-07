@@ -1,0 +1,2206 @@
+---
+title: "Vector Meson Production"
+output:
+  html_document:
+    toc: true
+    toc_depth: 1
+    df_print: paged
+---
+
+```{r include = FALSE}
+
+library(knitr)
+opts_chunk$set(tidy = FALSE)
+
+```
+
+This file contains the entirety of the vector meson production functions and results for the CGC, b-CGC, and b-SAT models. It is written to be run on a Windows machine, but can easily be edited for a Linux-type machine. The only changes that must be made are in the b-SAT imaginary scattering amplitude functions (change <tt>shell()</tt> to <tt>system()</tt>), and the encoding in the <tt>pdf()</tt> calls when creating plots (add <tt>encoding = "Greek"</tt> to the arguments so sigma will display properly).
+
+##References and Libraries
+
+```{r, warning = FALSE, message = FALSE}
+
+# William Woodley (wwoodley@ualberta.ca)
+# 3 August 2018
+
+# References
+
+# [1]: M. Ahmady, R. Sandapen, and N. Sharma, Phys. Rev. D 94, 074018 (2016), arXiv:1605.07665v2 [hep-ph].
+# [2]: A. H. Rezaeian, and I. Schmidt, Phys. Rev. D 88, 074016 (2013), arXiv:1307.0825v3 [hep-ph].
+# [3]: A. H. Rezaeian, et al., Phys. Rev. D 87, 034002 (2013), arXiv:1212.2974v1 [hep-ph].
+# [4]: G. Watt, and H. Kowalski, Phys. Rev. D 78, 014016 (2008), arXiv:0712.2670v2 [hep-ph].
+# [5]: S. A. Tehrani, and A. N. Khorramian, J. High Energy Phys. 0707:048 (2007), arXiv:0705.2647v2 [hep-ph].
+# [6]: S. Bethke, G. Dissertori, and G. P. Salam, Quantum Chromodynamics (2015), PDG.
+
+# References for experimental data
+
+# [7]:  C. Adloff et al. (H1 Collaboration), Eur. Phys. J. C 13, 371 (2000).
+# [8]:  F. D. Aaron et al. (H1 Collaboration), J. High Energy Phys. 05 (2010) 032.
+# [9]:  S. Chekanov et al. (ZEUS Collaboration), Nucl. Phys. B718, 3 (2005), arXiv:hep-ex/0504010.
+# [10]: S. Chekanov et al. (ZEUS Collaboration), PMC Phys. A 1, 6 (2007).
+
+# Libraries
+
+library(cubature)     # For adaptIntegrate()
+library(memoise)      # To cache variables using the memoise() function to make repeated calculations faster
+library(compiler)     # To compile functions using cmpfun() to make them faster
+library(tidyverse)    # To manipulate dataframes in the VMP() wrapper functions
+library(readxl)       # To import experimental data from excel spreadsheets
+
+```
+
+##Constants and Parameters
+
+```{r}
+
+# Define Bessel functions for shorthand
+
+K = function (input) { besselK(input, 0) }
+J = function (input) { besselJ(input, 0) }
+
+# Constants
+
+q_e        = sqrt(4*pi*(1/137)) # The elementary charge
+kappa      = 0.54               # The mass scale
+Lambda_QCD = 0.156              # For the coupling constant
+N_c        = 3                  # The number of colours
+n_f        = 4                  # The number of active flavours
+
+# Equations (9.3) from Reference [6]
+
+b_0 = (33 - 2*n_f)/(12*pi)                                  # The one-loop beta function coefficient
+b_1 = (153 - 19*n_f)/(24*(pi**2))                           # The two-loop beta function coefficient
+b_2 = (2857 - (5033/9)*n_f + (325/27)*n_f**2)/(128*(pi**3)) # The three-loop beta function coefficient
+
+# CGC model parameters from Reference [1], Table 4
+
+#                  gamma_s lambda x_nought N_nought sigma_nought (in nanobarns)
+CGC_parameters = c(0.724,  0.206, 6.33e-6, 0.7,     29.9/0.389379)
+
+CGC_gamma_s      = CGC_parameters[1]
+CGC_lambda       = CGC_parameters[2]
+CGC_x_nought     = CGC_parameters[3]
+CGC_N_nought     = CGC_parameters[4]
+CGC_sigma_nought = CGC_parameters[5]
+
+# b-CGC model parameters from Reference [2], Table 2
+
+#                   gamma_s lambda  x_nought N_nought B_CGC
+bCGC_parameters = c(0.6599, 0.2063, 0.00105, 0.3358,  5.5)
+
+bCGC_gamma_s  = bCGC_parameters[1]
+bCGC_lambda   = bCGC_parameters[2]
+bCGC_x_nought = bCGC_parameters[3]
+bCGC_N_nought = bCGC_parameters[4]
+bCGC_B_CGC    = bCGC_parameters[5]
+
+# b-SAT model parameters from Reference [3], Table 1
+
+#                   A_g    lambda_g mu_nought   B_G C
+bSAT_parameters = c(2.308, 0.058,   sqrt(1.51), 4,  4)
+
+A_g       = bSAT_parameters[1]
+lambda_g  = bSAT_parameters[2]
+mu_nought = bSAT_parameters[3]
+B_G       = bSAT_parameters[4]
+bSAT_C    = bSAT_parameters[5]
+
+```
+
+##Normalisation Constants
+
+The normalisation constants are calculated from the vector meson wavefunctions only:
+
+$$\mathcal{N}_{\lambda}=\frac{1}{2\pi\displaystyle\sum_{h,\ \bar{h}}\int_0^1\int_0^{\infty}r\left|\Psi_{h,\ \bar{h}}^{V,\ \lambda}(x,\ r)\right|^2\mathrm{d}r\mathrm{d}x}$$
+
+The factor of $2\pi r$ comes from integrating $\mathrm{d}^2\mathbf{r}=r\mathrm{d}r\mathrm{d}\theta$ over $\theta$ from 0 to $2\pi$.
+
+The normalisation constants are, therefore, independent of the dipole model, and so the same <tt>N_L</tt> and <tt>N_T</tt> can be used in the CGC, b-CGC, and b-SAT calculations.
+
+```{r}
+
+# Longitudinal normalisation constant function
+
+Normalise_L = function (variables, meson) {
+	
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    
+  }
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*(r**2)*x*(1 - x)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr2 = (kappa**2)*((x*(1 - x))**(3/2))*((kappa**2)*(r**2)*x*(1 - x) - 2)*exponent
+  
+  # Return the N_L integrand
+  
+  (1/2)*pi*r*((psi**2) + (2*(m**2)*(psi**2) - 2*psi*psi_dr2)/(x*(1 - x)*(M**2)) + ((m**4)*(psi**2) + (psi_dr2**2) - (2*(m**2)*psi*psi_dr2))/((x*(1 - x)*(M**2))**2))
+  
+}
+
+# Transverse normalisation constant function
+
+Normalise_T = function (variables, meson) {
+  
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    m = 0.14
+    
+  } else if (meson == "phi") {
+    
+    m = 0.14
+    
+  }
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*x*(1 - x)*(r**2)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Return the N_T integrand
+  
+  2*pi*r*(1/(4*(x**2)*((1 - x)**2)))*(((x**2 + (1 - x)**2)*(psi_dr**2)) + (m*psi)**2)
+  
+}
+
+```
+
+Because <tt>adaptIntegrate()</tt> cannot integrate to infinity, an upper limit for <tt>r</tt> on the integrals used to calculate <tt>N_L</tt> and <tt>N_T</tt> must be chosen. Therefore, plot the functions to see where they go to zero.
+
+```{r, fig.show = 'hold', out.width = '50%'}
+
+# Redefine the Normalisat_L and Normalise_T functions to take x and r in as separate variables
+
+Normalise_L_plot = Vectorize(function (x, r, meson) { Normalise_L(c(x, r), meson) })
+Normalise_T_plot = Vectorize(function (x, r, meson) { Normalise_T(c(x, r), meson) })
+
+x_seq = seq(from = 0, to = 1, by = 0.05)
+r_seq = seq(from = 0, to = 50, by = 1)
+
+values_L_rho = outer(x_seq, r_seq, Normalise_L_plot, meson = "rho")
+values_T_rho = outer(x_seq, r_seq, Normalise_T_plot, meson = "rho")
+
+persp(x_seq, r_seq, values_L_rho, xlab = "x", ylab = "r", zlab = "N_L_rho", main = "Longitudinal Normalisation Constant Integrand (Rho)", theta = 110, expand = 0.6, col = rainbow(200), ticktype = "detailed")
+persp(x_seq, r_seq, values_T_rho, xlab = "x", ylab = "r", zlab = "N_T_rho", main = "Transverse Normalisation Constant Integrand (Rho)", theta = 110, expand = 0.6, col = rainbow(200), ticktype = "detailed")
+
+values_L_phi = outer(x_seq, r_seq, Normalise_L_plot, meson = "phi")
+values_T_phi = outer(x_seq, r_seq, Normalise_T_plot, meson = "phi")
+
+persp(x_seq, r_seq, values_L_phi, xlab = "x", ylab = "r", zlab = "N_L_phi", main = "Longitudinal Normalisation Constant Integrand (Phi)", theta = 110, expand = 0.6, col = rainbow(200), ticktype = "detailed")
+persp(x_seq, r_seq, values_T_phi, xlab = "x", ylab = "r", zlab = "N_T_phi", main = "Transverse Normalisation Constant Integrand (Phi)", theta = 110, expand = 0.6, col = rainbow(200), ticktype = "detailed")
+
+```
+
+The plots are symmetric in <tt>x</tt>, as expected. From these plots, the upper limit for <tt>r</tt> can be set to 25 for <tt>N_L</tt>, and to 100 for <tt>N_T</tt>.
+
+```{r, results = 'hold'}
+
+# Normalisation constants for rho
+
+N_L_rho = 1/sqrt(adaptIntegrate(Normalise_L, lowerLimit = c(0, 0), upperLimit = c(1, 25), meson = "rho")$integral)
+N_T_rho = 1/sqrt(adaptIntegrate(Normalise_T, lowerLimit = c(0, 0), upperLimit = c(1, 100), meson = "rho")$integral)
+
+# Normalisation constants for phi
+
+N_L_phi = 1/sqrt(adaptIntegrate(Normalise_L, lowerLimit = c(0, 0), upperLimit = c(1, 25), meson = "phi")$integral)
+N_T_phi = 1/sqrt(adaptIntegrate(Normalise_T, lowerLimit = c(0, 0), upperLimit = c(1, 100), meson = "phi")$integral)
+
+cat("Rho:\n")
+cat("N_L =", N_L_rho, "\n")
+cat("N_T =", N_T_rho, "\n\n")
+
+cat("Phi:\n")
+cat("N_L =", N_L_phi, "\n")
+cat("N_T =", N_T_phi)
+
+```
+
+#1. The CGC Model
+
+##The Imaginary Scattering Amplitudes
+
+```{r}
+
+# Longitudinal imaginary scattering amplitude function
+
+CGC_A_L = function (variables, x_Bj, Q2, meson) {
+  
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_L = N_L_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_L = N_L_phi
+    
+  }
+  
+  # Parameter- and variable-dependent equations
+  
+  A       = -(CGC_N_nought*CGC_gamma_s)**2/((1 - CGC_N_nought)**2*log(1 - CGC_N_nought)) # Equation (39) from Reference [1]
+  B       = (1/2)*(1 - CGC_N_nought)**((CGC_N_nought - 1)/(CGC_N_nought*CGC_gamma_s))    # Equation (39) from Reference [1]
+  Q_s     = ((CGC_x_nought/x_Bj)**(CGC_lambda/2))                                        # Equation (38) from Reference [1]
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)                                                    # Equation (8)  from Reference [1]
+  
+  # Equation (38) from Reference [1]
+  
+  N = ifelse(r*Q_s > 2,
+             1 - exp(-A*((log(B*r*Q_s))**2)),
+             CGC_N_nought*(r*Q_s/2)**(2*(CGC_gamma_s + (log(2/(r*Q_s)))/(9.9*CGC_lambda*log(1/x_Bj)))))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi     = sqrt(x*(1 - x))*exponent
+  psi_dr2 = ((x*(1 - x))**(3/2))*(kappa**2)*((r**2)*(kappa**2)*x*(1 - x) - 2)*exponent
+  
+  # The photon and the vector meson wavefunctions
+  
+  psi_p = sqrt(N_c/pi)*q_e*e*x*(1 - x)*sqrt(Q2)*(K(epsilon*r)/pi)
+  psi_V = (N_L/(2*sqrt(2)))*((1 + ((m**2)/(x*(1 - x)*(M**2))))*psi - (1/(x*(1 - x)*(M**2)))*psi_dr2)
+  
+  # Return the integrand for the longitudinal scattering amplitude
+  
+  2 *                       # Integrate x from 0 to 0.5
+  psi_p *                   # The photon wavefunction
+  psi_V *                   # The complex conjugate of the vector meson wavefunction
+  2*pi*r*CGC_sigma_nought*N # The dipole cross section
+  
+}
+
+# Transverse imaginary scattering amplitude function
+
+CGC_A_T = function (variables, x_Bj, Q2, meson) {
+  
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_T = N_T_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_T = N_T_phi
+    
+  }
+  
+  # Parameter- and variable-dependent equations
+  
+  A       = -(CGC_N_nought*CGC_gamma_s)**2/((1 - CGC_N_nought)**2*log(1 - CGC_N_nought)) # Equation (39) from Reference [1]
+  B       = (1/2)*(1 - CGC_N_nought)**((CGC_N_nought - 1)/(CGC_N_nought*CGC_gamma_s))    # Equation (39) from Reference [1]
+  Q_s     = ((CGC_x_nought/x_Bj)**(CGC_lambda/2))                                        # Equation (38) from Reference [1]
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)                                                    # Equation (8)  from Reference [1]
+  
+  # Equation (38) from Reference [1]
+  
+  N = ifelse(r*Q_s > 2,
+             1 - exp(-A*((log(B*r*Q_s))**2)),
+             CGC_N_nought*(r*Q_s/2)**(2*(CGC_gamma_s + (log(2/(r*Q_s)))/(9.9*CGC_lambda*log(1/x_Bj)))))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Product of the photon wavefunction and the complex conjugate of the vector meson wavefunction
+  
+  psi_Vp = N_T*sqrt(N_c/(2*pi))*q_e*e*((x**2 + (1 - x)**2)*(-epsilon*(besselK(epsilon*r, 1))/(2*pi))*(psi_dr/(2*x*(1 - x))) + (m**2)*(K(epsilon*r)/(2*pi))*(psi/(2*x*(1 - x))))
+  
+  # Return the integrand for the transverse scattering amplitude
+  
+  2 *                       # Integrate x from 0 to 0.5
+  psi_Vp *                  # The wavefunctions
+  2*pi*r*CGC_sigma_nought*N # The dipole cross section
+  
+}
+
+CGC_A_L = memoise(cmpfun(CGC_A_L))
+CGC_A_T = memoise(cmpfun(CGC_A_T))
+
+```
+
+###Test Values
+
+```{r, results = 'hold'}
+
+# x_Bj = 0.008916683 corresponds to W = 75
+
+cat("Rho:\n")
+CGC_A_L(variables = c(0.5, 10), x_Bj = 0.008916683, Q2 = 50, meson = "rho")
+CGC_A_T(variables = c(0.5, 10), x_Bj = 0.008916683, Q2 = 50, meson = "rho")
+
+# x_Bj = 0.006262625 corresponds to W = 90
+
+cat("\nPhi:\n")
+CGC_A_L(variables = c(0.5, 10), x_Bj = 0.006262625, Q2 = 50, meson = "phi")
+CGC_A_T(variables = c(0.5, 10), x_Bj = 0.006262625, Q2 = 50, meson = "phi")
+
+```
+
+##The Differential Cross Section, Total Cross Section, and Ratio
+
+```{r}
+
+# Longitudinal differential cross section and cross section function
+
+CGC_sigma_L = function (x_Bj, Q2, t, meson) {
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    
+  }
+  
+  # Real-part correction
+  
+  ImA_L_x = adaptIntegrate(CGC_A_L, lowerLimit = c(1e-10, 1e-10), upperLimit = c(0.5, 100), x_Bj, Q2, meson, tol = 1e-2)$integral
+  ImA_L_h = adaptIntegrate(CGC_A_L, lowerLimit = c(1e-10, 1e-10), upperLimit = c(0.5, 100), x_Bj + 1e-15, Q2, meson, tol = 1e-2)$integral
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_L_x/ImA_L_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  multiplier =
+  (ImA_L_x**2) *              # Im(A_L) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  3.89379e5                   # Convert to nanobarns
+  
+  # Equation (11) from Reference [1]
+  
+  B_D = 0.55*(14*((1/(Q2 + (M**2)))**0.2) + 1)
+  
+  d_sigma_L = multiplier * exp(-B_D*t)
+  sigma_L   = multiplier * (1/B_D)
+  
+  # Return a vector of the differential cross section and the cross section
+  
+  c(d_sigma_L, sigma_L)
+  
+}
+
+# Transverse differential cross section and cross section function
+
+CGC_sigma_T = function (x_Bj, Q2, t, meson) {
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    
+  }
+  
+  # Real-part correction
+  
+  ImA_T_x = adaptIntegrate(CGC_A_T, lowerLimit = c(1e-10, 1e-10), upperLimit = c(0.5, 100), x_Bj, Q2, meson, tol = 1e-2)$integral
+  ImA_T_h = adaptIntegrate(CGC_A_T, lowerLimit = c(1e-10, 1e-10), upperLimit = c(0.5, 100), x_Bj + 1e-15, Q2, meson, tol = 1e-2)$integral
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_T_x/ImA_T_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  multiplier =
+  (ImA_T_x**2) *              # Im(A_L) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  3.89379e5                   # Convert to nanobarns
+  
+  # Equation (11) from Reference [1]
+  
+  B_D = 0.55*(14*((1/(Q2 + (M**2)))**0.2) + 1)
+  
+  d_sigma_T = multiplier * exp(-B_D*t)
+  sigma_T   = multiplier * (1/B_D)
+  
+  # Return a vector of the differential cross section and the cross section
+  
+  c(d_sigma_T, sigma_T)
+  
+}
+
+CGC_sigma_L = memoise(Vectorize(cmpfun(CGC_sigma_L)))
+CGC_sigma_T = memoise(Vectorize(cmpfun(CGC_sigma_T)))
+
+```
+
+###Test Values
+
+```{r, results = 'hold'}
+
+# x_Bj = 0.008916683 corresponds to W = 75
+
+cat("Rho:\n")
+CGC_sigma_L(x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+CGC_sigma_T(x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+
+# x_Bj = 0.006262625 corresponds to W = 90
+
+cat("\nPhi:\n")
+CGC_sigma_L(x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+CGC_sigma_T(x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+
+# The output (for three Q^2 values) is of the form:
+
+#      [,1]      [,2]      [,3]
+# [1,] d_sigma_1 d_sigma_2 d_sigma_3
+# [2,] sigma_1   sigma_2   sigma_3
+
+```
+
+##The CGC Data Frame Wrapper
+
+```{r}
+
+# Cross section and ratio function
+
+CGC_VMP = function (x_Bj, Q2, t, meson) {
+  
+  sigma_L = CGC_sigma_L(x_Bj, Q2, t, meson)
+  sigma_T = CGC_sigma_T(x_Bj, Q2, t, meson)
+  
+  d_sigma = sigma_T[1] + 0.98*sigma_L[1]
+  sigma   = sigma_T[2] + 0.98*sigma_L[2]
+  ratio   = sigma_L[2]/sigma_T[2]
+  
+  c(d_sigma, sigma, ratio)
+  
+}
+
+CGC_VMP = memoise(Vectorize(cmpfun(CGC_VMP)))
+
+# A wrapper in order to return the results in a data frame
+# Calculate x_Bj inside this function in order to display it in the data frame
+
+CGC = function(Q2, W, t = 0, meson) {
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    
+  } else {
+    
+    stop("Not a valid meson")
+    
+  }
+  
+  # Modified x_Bj for low Q2
+  
+  x_Bj = (Q2 + (M**2))/(Q2 + (W**2))
+  
+  output = as.data.frame(t(CGC_VMP(x_Bj, Q2, t, meson)))
+  output = mutate(output, x_Bj, W, Q2, t)
+  rownames(output) = NULL
+  colnames(output) = c("d_sigma", "sigma", "ratio", "x_Bj", "W", "Q2", "t")
+  output = select(output, Q2, W, x_Bj, t, d_sigma, sigma, ratio)
+  output
+  
+}
+
+CGC = memoise(cmpfun(CGC))
+
+```
+
+###Test Values
+
+```{r}
+
+CGC(Q2 = 50, W = 75, t = 0.5, meson = "rho")
+
+CGC(Q2 = 50, W = 90, t = 0.5, meson = "phi")
+
+```
+
+#2. The b-CGC Model
+
+##The Imaginary Scattering Amplitudes
+
+```{r}
+
+# Longitudinal imaginary scattering amplitude function
+
+bCGC_A_L = function (variables, x_Bj, Q2, t, meson) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_L = N_L_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_L = N_L_phi
+    
+  }
+  
+  # Parameter- and variable-dependent equations
+  
+  A       = -((bCGC_N_nought*bCGC_gamma_s)**2)/(((1 - bCGC_N_nought)**2)*log(1 - bCGC_N_nought))          # Equation (39) from Reference [1]
+  B       = (1/2)*(1 - bCGC_N_nought)**((bCGC_N_nought - 1)/(bCGC_N_nought*bCGC_gamma_s))                 # Equation (39) from Reference [1]
+  Q_s     = ((bCGC_x_nought/x_Bj)**(bCGC_lambda/2))*((exp(-(b**2)/(2*bCGC_B_CGC)))**(1/(2*bCGC_gamma_s))) # Equation (9)  from Reference [4]
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)                                                                     # Equation (8)  from [1]
+  
+  # Equation (8) from Reference [4]
+  
+  N = ifelse(r*Q_s > 2,
+             1 - exp(-A*(log(B*r*Q_s))**2),
+             bCGC_N_nought*(r*Q_s/2)**(2*(bCGC_gamma_s + (log(2/(r*Q_s)))/(9.9*bCGC_lambda*log(1/x_Bj)))))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi     = sqrt(x*(1 - x))*exponent
+  psi_dr2 = ((x*(1 - x))**(3/2))*(kappa**2)*((r**2)*(kappa**2)*x*(1 - x) - 2)*exponent
+  
+  # The photon and the vector meson wavefunctions
+  
+  psi_p = sqrt(N_c/pi)*q_e*e*x*(1 - x)*sqrt(Q2)*(K(epsilon*r)/pi)
+  psi_V = (N_L/(2*sqrt(2)))*((1 + ((m**2)/(x*(1 - x)*(M**2))))*psi - (1/(x*(1 - x)*(M**2)))*psi_dr2)
+  
+  # Return the integrand for the longitudinal scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_p *                 # The photon wavefunction
+  psi_V *                 # The complex conjugate of the vector meson wavefunction
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+# Transverse imaginary scattering amplitude function
+
+bCGC_A_T = function (variables, x_Bj, Q2, t, meson) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_T = N_T_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_T = N_T_phi
+    
+  }
+  
+  # Parameter- and variable-dependent equations
+  
+  A       = -((bCGC_N_nought*bCGC_gamma_s)**2)/(((1 - bCGC_N_nought)**2)*log(1 - bCGC_N_nought))          # Equation (39) from Reference [1]
+  B       = (1/2)*(1 - bCGC_N_nought)**((bCGC_N_nought - 1)/(bCGC_N_nought*bCGC_gamma_s))                 # Equation (39) from Reference [1]
+  Q_s     = ((bCGC_x_nought/x_Bj)**(bCGC_lambda/2))*((exp(-(b**2)/(2*bCGC_B_CGC)))**(1/(2*bCGC_gamma_s))) # Equation (9)  from Reference [4]
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)                                                                     # Equation (8)  from [1]
+  
+  # Equation (8) from Reference [4]
+  
+  N = ifelse(r*Q_s > 2,
+             1 - exp(-A*(log(B*r*Q_s))**2),
+             bCGC_N_nought*(r*Q_s/2)**(2*(bCGC_gamma_s + (log(2/(r*Q_s)))/(9.9*bCGC_lambda*log(1/x_Bj)))))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*x*(1 - x)*(r**2)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Product of the photon wavefunction and the complex conjugate of the vector meson wavefunction
+  
+  psi_Vp = N_T*sqrt(N_c/(2*pi))*q_e*e*((x**2 + (1 - x)**2)*(-epsilon*(besselK(epsilon*r, 1))/(2*pi))*(psi_dr/(2*x*(1 - x))) + (m**2)*(K(epsilon*r)/(2*pi))*(psi/(2*x*(1 - x))))
+  
+  # Return the integrand for the longitudinal scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_Vp *                # The wavefunctions
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+bCGC_A_L = memoise(cmpfun(bCGC_A_L))
+bCGC_A_T = memoise(cmpfun(bCGC_A_T))
+
+# Longitudinal imaginary scattering amplitude integration function
+
+bCGC_IntA_L = function (x_Bj, Q2, t, meson) {
+  
+  adaptIntegrate(bCGC_A_L, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, meson, tol = 0.01)$integral
+  
+}
+
+# Transverse imaginary scattering amplitude integration function
+
+bCGC_IntA_T = function (x_Bj, Q2, t, meson) {
+  
+  adaptIntegrate(bCGC_A_T, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, meson, tol = 0.01)$integral
+  
+}
+
+bCGC_IntA_L = memoise(cmpfun(bCGC_IntA_L))
+bCGC_IntA_T = memoise(cmpfun(bCGC_IntA_T))
+
+```
+
+###Test Values
+
+```{r, results = 'hold'}
+
+# x_Bj = 0.008916683 corresponds to W = 75
+
+cat("Rho:\n")
+bCGC_A_L(variables = c(5, 0.5, 10), x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+bCGC_A_T(variables = c(5, 0.5, 10), x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+
+bCGC_IntA_L(x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+bCGC_IntA_T(x_Bj = 0.008916683, Q2 = 50, t = 0.5, meson = "rho")
+
+# x_Bj = 0.006262625 corresponds to W = 90
+
+cat("\nPhi:\n")
+bCGC_A_L(variables = c(5, 0.5, 10), x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+bCGC_A_T(variables = c(5, 0.5, 10), x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+
+bCGC_IntA_L(x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+bCGC_IntA_T(x_Bj = 0.006262625, Q2 = 50, t = 0.5, meson = "phi")
+
+```
+
+##The Differential Cross Sections
+
+```{r}
+
+# Longitudinal differential cross section function
+
+bCGC_d_sigma_L = function (t, x_Bj, Q2, meson) {
+  
+  # Real-part correction
+  
+  ImA_L_x = bCGC_IntA_L(x_Bj, Q2, t, meson)
+  ImA_L_h = bCGC_IntA_L(x_Bj + 1e-15, Q2, t, meson)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_L_x/ImA_L_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the longitudinal differential cross section
+  
+  (ImA_L_x**2) *              # Im(A_L) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+# Transverse differential cross section function
+
+bCGC_d_sigma_T = function (t, x_Bj, Q2, meson) {
+  
+  # Real-part correction
+  
+  ImA_T_x = bCGC_IntA_T(x_Bj, Q2, t, meson)
+  ImA_T_h = bCGC_IntA_T(x_Bj + 1e-15, Q2, t, meson)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_T_x/ImA_T_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the transverse differential cross section
+  
+  (ImA_T_x**2) *              # Im(A_T) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+bCGC_d_sigma_L = memoise(Vectorize(cmpfun(bCGC_d_sigma_L)))
+bCGC_d_sigma_T = memoise(Vectorize(cmpfun(bCGC_d_sigma_T)))
+
+```
+
+###Test Values
+
+```{r, results = 'hold'}
+
+# x_Bj = 0.008916683 corresponds to W = 75
+
+cat("Rho:\n")
+bCGC_d_sigma_L(t = 0.5, x_Bj = 0.008916683, Q2 = 50, meson = "rho")
+bCGC_d_sigma_T(t = 0.5, x_Bj = 0.008916683, Q2 = 50, meson = "rho")
+
+# x_Bj = 0.006262625 corresponds to W = 90
+
+cat("\nPhi:\n")
+bCGC_d_sigma_L(t = 0.5, x_Bj = 0.006262625, Q2 = 50, meson = "phi")
+bCGC_d_sigma_T(t = 0.5, x_Bj = 0.006262625, Q2 = 50, meson = "phi")
+
+```
+
+##The b-CGC Data Frame Wrapper
+
+```{r}
+
+# Cross section and ratio function
+
+bCGC_VMP = function (x_Bj, Q2, t, meson, return) {
+  
+  d_sigma = bCGC_d_sigma_T(t, x_Bj, Q2, meson) + 0.98*bCGC_d_sigma_L(t, x_Bj, Q2, meson)
+  
+  # The following lines take a long time to run
+  # Therefore, they only run if the sigma and/or ratio values are needed (indicated by the argument return being set to "sigma" or "ratio")
+  # Otherwise, they are set to 0
+  
+  if (return == "sigma" | return == "ratio") {
+    
+    sigma_L = integrate(bCGC_d_sigma_L, lower = 0, upper = 1, x_Bj, Q2, meson, rel.tol = 0.1)$value
+    sigma_T = integrate(bCGC_d_sigma_T, lower = 0, upper = 1, x_Bj, Q2, meson, rel.tol = 0.1)$value
+    
+    sigma   = sigma_T + 0.98*sigma_L
+    ratio   = sigma_L/sigma_T
+    
+  } else {
+    
+    sigma = 0
+    ratio = 0
+    
+  }
+  
+  c(d_sigma, sigma, ratio)
+  
+}
+
+bCGC_VMP = memoise(Vectorize(cmpfun(bCGC_VMP)))
+
+# A wrapper in order to return the results in a data frame
+# Calculate x_Bj inside this function in order to display it in the data frame
+
+bCGC = function (Q2, W, t = 0, meson, return = "") {
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    
+  } else {
+    
+    stop("Not a valid meson")
+    
+  }
+  
+  # Modified x_Bj for low Q2
+  
+  x_Bj = (Q2 + (M**2))/(Q2 + (W**2))
+  
+  output = as.data.frame(t(bCGC_VMP(x_Bj, Q2, t, meson, return)))
+  output = mutate(output, x_Bj, W, Q2, t)
+  rownames(output) = NULL
+  colnames(output) = c("d_sigma", "sigma", "ratio", "x_Bj", "W", "Q2", "t")
+  output = select(output, Q2, W, x_Bj, t, d_sigma, sigma, ratio)
+  output
+  
+}
+
+bCGC = memoise(cmpfun(bCGC))
+
+```
+
+###Test Values
+
+```{r, eval = FALSE}
+
+bCGC(Q2 = 50, W = 75, t = 0.5, meson = "rho", return = "sigma")
+
+bCGC(Q2 = 50, W = 90, t = 0.5, meson = "phi", return = "sigma")
+
+```
+
+#3. The b-SAT Model
+
+This code calculates the evolved gluon density $xg(x_{Bj},\ \mu^2)$ by calling HOPPET directly (as in <span style="color:blue;"><tt>bSAT.Rmd</tt></span>). This requires the <span style="color:rgb(127, 0, 127);"><tt>tabulation_example.f90</tt></span> file that comes with HOPPET to be replaced by <span style="color:blue;"><tt>tabulation_example for bSAT.f90</tt></span>. Do this by following these steps:
+
+1. Rename <span style="color:blue;"><tt>tabulation_example for bSAT.f90</tt></span> "<span style="color:rgb(127, 0, 127);"><tt>tabulation_example.f90</tt></span>"
+2. Place the renamed file in HOPPET's <span style="color:rgb(127, 0, 127);"><tt>example_f90</tt></span> folder
+3. Remake the file by running <span style="color:rgb(127, 0, 127);"><tt>make tabulation_example</tt></span> in a terminal
+4. Change the file paths in the <tt>setwd()</tt> calls in the code below
+
+Otherwise, guidelines on editing <span style="color:rgb(127, 0, 127);"><tt>tabulation_example.f90</tt></span> are in <span style="color:blue;"><tt>Using HOPPET.pdf</tt></span>.
+
+Because performing so many evolutions with HOPPET takes such a long time, this part of the code is best run as a <tt>.R</tt> file on ACE-NET. The steps for running it on ACE-NET are in the <span style="color:blue;"><tt>Using ACE-NET.pdf</tt></span> file. The amount of time the code takes to run on ACE-NET is listed in the <span style="color:blue;"><tt>Algorithm Runtime Comparisons.txt</tt></span> file.
+
+##The Imaginary Scattering Amplitudes
+
+There are other (less accurate, but potentially faster) ways of calculating the imaginary scattering amplitudes than the algorithm given here. An alternative is to follow the equations in <span style="color:blue;"><tt>Gluon Density.pdf</tt></span>, which transforms the gluon density $xg(x_{Bj},\ \mu^2)$ in momentum space into a gluon density moment $xg(N,\ \mu^2)$ in moment space, evolves using DGLAP, and then transforms back by expanding in Jacobi polynomials, as is done in <a href="https://arxiv.org/abs/0705.2647"><span style="color:red;" target="_blank">Reference [5]</span></a>. However, this algorithm (written in <span style="color:blue;"><tt>bSAT_DGLAP_Notes.R</tt></span>) has issues with convergence of the expansion series.
+
+```{r, eval = FALSE}
+
+# Longitudinal imaginary scattering amplitude function
+
+bSAT_A_L = function (variables, x_Bj, Q2, t, meson) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_L = N_L_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_L = N_L_phi
+    
+  }
+  
+  # Equation (16) from Reference [3]
+  # Define mu rather than mu2, because HOPPET evolves with mu
+  
+  mu = sqrt((bSAT_C/(r**2)) + mu_nought**2)
+  
+  # Set the working directory to the location of tabulation_example.f90
+  # This is so that data can be written to files in the correct folder for HOPPET to access
+  
+  setwd("/Desktop/hoppet-1.2.0/example_f90")
+  
+  # The gluon density is a function of mu and x_Bj
+  # Therefore write these values to a file in order to read them into HOPPET
+  # There are lines in HOPPET that read these parameters in from these file
+  
+  write(c(A_g, lambda_g), file = "parameters")
+  write(c(mu_nought, mu), file = "mu.txt")
+  write(x_Bj, file = "heralhc_xvals.txt")
+  
+  # Direct the output evolved gluon density from HOPPET back to R
+  # For a non-Windows machine, change shell() to system()
+  
+  xg = as.numeric(shell("./tabulation_example", intern = TRUE))
+  
+  # Equation (9.5) from Reference [6]
+  
+  t_r = log((mu/Lambda_QCD)**2)
+  alpha_s = (1/(b_0*t_r))
+  
+  # Variable-dependent equations
+  
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)           # Equation (8) from Reference [1]
+  T_G     = (1/(2*pi*B_G))*exp(-(b**2)/(2*B_G)) # Equation (2.6) from Reference [3]
+  
+  # Equation (2.5) from Reference [3]
+  
+  N = 1 - exp(-(((pi**2)*(r**2))/(2*N_c))*(alpha_s * xg * T_G))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi     = sqrt(x*(1 - x))*exponent
+  psi_dr2 = ((x*(1 - x))**(3/2))*(kappa**2)*((r**2)*(kappa**2)*x*(1 - x) - 2)*exponent
+  
+  # The photon and the vector meson wavefunctions
+  
+  psi_p = sqrt(N_c/pi)*q_e*e*x*(1 - x)*sqrt(Q2)*(K(epsilon*r)/pi)
+  psi_V = (N_L/(2*sqrt(2)))*((1 + ((m**2)/(x*(1 - x)*(M**2))))*psi - (1/(x*(1 - x)*(M**2)))*psi_dr2)
+  
+  # Return the integrand for the longitudinal scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_p *                 # The photon wavefunction
+  psi_V *                 # The complex conjugate of the vector meson wavefunction
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+# Transverse imaginary scattering amplitude function
+
+bSAT_A_T = function (variables, x_Bj, Q2, t, meson) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    m = 0.14
+    e = 0.707107
+    
+    N_T = N_T_rho
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    m = 0.14
+    e = 0.333333
+    
+    N_T = N_T_phi
+    
+  }
+  
+  # Equation (16) from Reference [3]
+  # Define mu rather than mu2, because HOPPET evolves with mu
+  
+  mu = sqrt((bSAT_C/(r**2)) + mu_nought**2)
+  
+  # Set the working directory to the location of tabulation_example.f90
+  # This is so that data can be written to files in the correct folder for HOPPET to access
+  
+  setwd("/Desktop/hoppet-1.2.0/example_f90")
+  
+  # The gluon density is a function of mu and x_Bj
+  # Therefore write these values to a file in order to read them into HOPPET
+  # There are lines in HOPPET that read these parameters in from these file
+  
+  write(c(A_g, lambda_g), file = "parameters")
+  write(c(mu_nought, mu), file = "mu.txt")
+  write(x_Bj, file = "heralhc_xvals.txt")
+  
+  # Direct the output evolved gluon density from HOPPET back to R
+  # For a non-Windows machine, change shell() to system()
+  
+  xg = as.numeric(shell("./tabulation_example", intern = TRUE))
+  
+  # Equation (9.5) from Reference [6]
+  
+  t_r = log((mu/Lambda_QCD)**2)
+  alpha_s = (1/(b_0*t_r))
+  
+  # Variable-dependent equations
+  
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)           # Equation (8) from Reference [1]
+  T_G     = (1/(2*pi*B_G))*exp(-(b**2)/(2*B_G)) # Equation (2.6) from Reference [3]
+  
+  # Equation (2.5) from Reference [3]
+  
+  N = 1 - exp(-(((pi**2)*(r**2))/(2*N_c))*(alpha_s * xg * T_G))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*x*(1 - x)*(r**2)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Product of the photon wavefunction and the complex conjugate of the vector meson wavefunction
+  
+  psi_Vp = N_T*sqrt(N_c/(2*pi))*q_e*e*((x**2 + (1 - x)**2)*(-epsilon*(besselK(epsilon*r, 1))/(2*pi))*(psi_dr/(2*x*(1 - x))) + (m**2)*(K(epsilon*r)/(2*pi))*(psi/(2*x*(1 - x))))
+  
+  # Return the integrand for the transverse scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_Vp *                # The wavefunctions
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+bSAT_A_L = memoise(cmpfun(bSAT_A_L))
+bSAT_A_T = memoise(cmpfun(bSAT_A_T))
+
+# Longitudinal imaginary scattering amplitude integration function
+
+bSAT_IntA_L = function (x_Bj, Q2, t, meson) {
+  
+  adaptIntegrate(bSAT_A_L, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, meson, tol = 0.01)$integral
+  
+}
+
+# Transverse imaginary scattering amplitude integration function
+
+bSAT_IntA_T = function (x_Bj, Q2, t, meson) {
+  
+  adaptIntegrate(bSAT_A_T, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, meson, tol = 0.01)$integral
+  
+}
+
+bSAT_IntA_L = memoise(cmpfun(bSAT_IntA_L))
+bSAT_IntA_T = memoise(cmpfun(bSAT_IntA_T))
+
+```
+
+###Test Values
+
+Test values can be run using the <span style="color:blue"><tt>bSAT.Rmd</tt></span> code.
+
+##The Differential Cross Sections
+
+```{r, eval = FALSE}
+
+# Longitudinal differential cross section function
+
+bSAT_d_sigma_L = function (t, x_Bj, Q2, meson) {
+  
+  # Real-part correction
+  
+  ImA_L_x = bSAT_IntA_L(x_Bj, Q2, t, meson)
+  ImA_L_h = bSAT_IntA_L(x_Bj + 1e-15, Q2, t, meson)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_L_x/ImA_L_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the longitudinal differential cross section
+  
+  (ImA_L_x**2) *              # Im(A_L) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+# Transverse differential cross section function
+
+bSAT_d_sigma_T = function (t, x_Bj, Q2, meson) {
+  
+  # Real-part correction
+  
+  ImA_T_x = bSAT_IntA_T(x_Bj, Q2, t, meson)
+  ImA_T_h = bSAT_IntA_T(x_Bj + 1e-15, Q2, t, meson)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_T_x/ImA_T_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the transverse differential cross section
+  
+  (ImA_T_x**2) *              # Im(A_T) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+bSAT_d_sigma_L = memoise(Vectorize(cmpfun(bSAT_d_sigma_L)))
+bSAT_d_sigma_T = memoise(Vectorize(cmpfun(bSAT_d_sigma_T)))
+
+```
+
+##The b-SAT Data Frame Wrapper
+
+```{r, eval = FALSE}
+
+# Cross section and ratio function
+
+bSAT_VMP = function (x_Bj, Q2, t, meson, return) {
+  
+  d_sigma = bSAT_d_sigma_T(t, x_Bj, Q2, meson) + 0.98*bSAT_d_sigma_L(t, x_Bj, Q2, meson)
+  
+  # The following lines take a long time to run
+  # Therefore, they only run if the sigma and/or ratio values are needed (indicated by the argument return being set to "sigma" or "ratio")
+  # Otherwise, they are set to 0
+  
+  if (return == "sigma" | return == "ratio") {
+    
+    sigma_L = integrate(bSAT_d_sigma_L, lower = 0, upper = 1, x_Bj, Q2, meson, rel.tol = 0.1)$value
+    sigma_T = integrate(bSAT_d_sigma_T, lower = 0, upper = 1, x_Bj, Q2, meson, rel.tol = 0.1)$value
+    
+    sigma   = sigma_T + 0.98*sigma_L
+    ratio   = sigma_L/sigma_T
+    
+  } else {
+    
+    sigma = 0
+    ratio = 0
+    
+  }
+  
+  c(d_sigma, sigma, ratio)
+  
+}
+
+# A wrapper in order to return the results in a data frame
+# Calculate x_Bj inside this function in order to display it in the data frame
+
+bSAT = function (Q2, W, t = 0, meson, return = "") {
+  
+  # Set the meson-dependent constant values
+  
+  if (meson == "rho") {
+    
+    M = 0.776
+    
+  } else if (meson == "phi") {
+    
+    M = 1.020
+    
+  } else {
+    
+    stop("Not a valid meson")
+    
+  }
+  
+  # Modified x_Bj for low Q2
+  
+  x_Bj = (Q2 + (M**2))/(Q2 + (W**2))
+  
+  output = as.data.frame(t(bSAT_VMP(x_Bj, Q2, t, meson, return)))
+  output = mutate(output, x_Bj, W, Q2, t)
+  rownames(output) = NULL
+  colnames(output) = c("d_sigma", "sigma", "ratio", "x_Bj", "W", "Q2", "t")
+  output = select(output, Q2, W, x_Bj, t, d_sigma, sigma, ratio)
+  output
+  
+}
+
+```
+
+#Theoretical Calculations
+
+##Rho Calculations
+
+```{r}
+
+# Plots vs t
+
+CGC_t = c(0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
+
+CGC_d_sigma_3.3_rho = CGC(Q2 = 3.3, W = 75, t = CGC_t, meson = "rho")
+CGC_d_sigma_6.6_rho = CGC(Q2 = 6.6, W = 75, t = CGC_t, meson = "rho")
+CGC_d_sigma_11.5_rho = CGC(Q2 = 11.5, W = 75, t = CGC_t, meson = "rho")
+CGC_d_sigma_17.4_rho = CGC(Q2 = 17.4, W = 75, t = CGC_t, meson = "rho")
+CGC_d_sigma_33.0_rho = CGC(Q2 = 33.0, W = 75, t = CGC_t, meson = "rho")
+
+bCGC_t = c(0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
+
+bCGC_d_sigma_3.3_rho = bCGC(Q2 = 3.3, W = 75, t = bCGC_t, meson = "rho")
+bCGC_d_sigma_6.6_rho = bCGC(Q2 = 6.6, W = 75, t = bCGC_t, meson = "rho")
+bCGC_d_sigma_11.5_rho = bCGC(Q2 = 11.5, W = 75, t = bCGC_t, meson = "rho")
+bCGC_d_sigma_17.4_rho = bCGC(Q2 = 17.4, W = 75, t = bCGC_t, meson = "rho")
+bCGC_d_sigma_33.0_rho = bCGC(Q2 = 33.0, W = 75, t = bCGC_t, meson = "rho")
+
+```
+
+```{r, eval = FALSE}
+
+# Plots vs Q2
+
+CGC_Q2_rho = c(1, 2, 5, 10, 20, 25, 30, 40, 50, 75, 100)
+
+CGC_vs_Q2_rho = CGC(Q2 = CGC_Q2_rho, W = 75, meson = "rho")
+CGC_sigma_vs_Q2_rho = CGC_vs_Q2_rho$sigma
+CGC_ratio_vs_Q2_rho = CGC_vs_Q2_rho$ratio
+
+bCGC_Q2_rho = c(2.5, 7.5, 15, 30, 40, 50, 75, 100)
+
+bCGC_vs_Q2_rho = bCGC(Q2 = bCGC_Q2_rho, W = 75, meson = "rho", return = "sigma")
+bCGC_sigma_vs_Q2_rho = bCGC_vs_Q2_rho$sigma
+bCGC_ratio_vs_Q2_rho = bCGC_vs_Q2_rho$ratio
+
+```
+
+```{r, eval = FALSE}
+
+# Plots vs W
+
+CGC_W_rho = c(35, 40, 60, 70, 80, 90, 100, 125, 150, 175, 200)
+
+CGC_vs_W_0_rho = CGC(Q2 = 0, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_3.3_rho = CGC(Q2 = 3.3, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_6.6_rho = CGC(Q2 = 6.6, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_11.9_rho = CGC(Q2 = 11.9, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_19.5_rho = CGC(Q2 = 19.5, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_35.6_rho = CGC(Q2 = 35.6, W = CGC_W_rho, meson = "rho")
+
+CGC_vs_W_2.4_rho = CGC(Q2 = 2.4, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_3.7_rho = CGC(Q2 = 3.7, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_6.0_rho = CGC(Q2 = 6.0, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_8.3_rho = CGC(Q2 = 8.3, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_13.5_rho = CGC(Q2 = 13.5, W = CGC_W_rho, meson = "rho")
+CGC_vs_W_32.0_rho = CGC(Q2 = 32.0, W = CGC_W_rho, meson = "rho")
+
+bCGC_W_rho = c(35, 60, 80, 100, 125, 150, 175, 200)
+
+bCGC_vs_W_0_rho = bCGC(Q2 = 0, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_3.3_rho = bCGC(Q2 = 3.3, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_6.6_rho = bCGC(Q2 = 6.6, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_11.9_rho = bCGC(Q2 = 11.9, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_19.5_rho = bCGC(Q2 = 19.5, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_35.6_rho = bCGC(Q2 = 35.6, W = bCGC_W_rho, meson = "rho", return = "sigma")
+
+bCGC_vs_W_2.4_rho = bCGC(Q2 = 2.4, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_3.7_rho = bCGC(Q2 = 3.7, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_6.0_rho = bCGC(Q2 = 6.0, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_8.3_rho = bCGC(Q2 = 8.3, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_13.5_rho = bCGC(Q2 = 13.5, W = bCGC_W_rho, meson = "rho", return = "sigma")
+bCGC_vs_W_32.0_rho = bCGC(Q2 = 32.0, W = bCGC_W_rho, meson = "rho", return = "sigma")
+
+```
+
+##Phi Calculations
+
+```{r, eval = FALSE}
+
+# Plots vs t
+
+CGC_t = c(0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
+
+CGC_d_sigma_3.3_phi = CGC(Q2 = 3.3, W = 75, t = CGC_t, meson = "phi")
+CGC_d_sigma_6.6_phi = CGC(Q2 = 6.6, W = 75, t = CGC_t, meson = "phi")
+CGC_d_sigma_15.8_phi = CGC(Q2 = 15.8, W = 75, t = CGC_t, meson = "phi")
+
+bCGC_t = c(0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
+
+bCGC_d_sigma_3.3_phi = bCGC(Q2 = 3.3, W = 75, t = bCGC_t, meson = "phi")
+bCGC_d_sigma_6.6_phi = bCGC(Q2 = 6.6, W = 75, t = bCGC_t, meson = "phi")
+bCGC_d_sigma_15.8_phi = bCGC(Q2 = 15.8, W = 75, t = bCGC_t, meson = "phi")
+
+```
+
+```{r, eval = FALSE}
+
+# Plots vs Q2
+
+CGC_Q2_phi = c(1, 2, 5, 10, 20, 25, 30, 40, 50)
+
+CGC_vs_Q2_phi = CGC(Q2 = CGC_Q2_phi, W = 90, meson = "phi")
+CGC_sigma_vs_Q2_phi = CGC_vs_Q2_phi$sigma
+CGC_ratio_vs_Q2_phi = CGC_vs_Q2_phi$ratio
+
+bCGC_Q2_phi = c(2.5, 7.5, 15, 30, 40, 50)
+
+bCGC_vs_Q2_phi = bCGC(Q2 = bCGC_Q2_phi, W = 90, meson = "phi", return = "sigma")
+bCGC_sigma_vs_Q2_phi = bCGC_vs_Q2_phi$sigma
+bCGC_ratio_vs_Q2_phi = bCGC_vs_Q2_phi$ratio
+
+```
+
+```{r, eval = FALSE}
+
+# Plots vs W
+
+CGC_W_phi = c(35, 40, 60, 70, 80, 90, 100, 125, 160)
+
+CGC_vs_W_2.4_phi = CGC(Q2 = 2.4, W = CGC_W_phi, meson = "phi", return = "sigma")
+CGC_vs_W_3.8_phi = CGC(Q2 = 3.8, W = CGC_W_phi, meson = "phi", return = "sigma")
+CGC_vs_W_6.5_phi = CGC(Q2 = 6.5, W = CGC_W_phi, meson = "phi", return = "sigma")
+CGC_vs_W_13.0_phi = CGC(Q2 = 13.0, W = CGC_W_phi, meson = "phi", return = "sigma")
+
+CGC_vs_W_3.3_phi = CGC(Q2 = 3.3, W = CGC_W_phi, meson = "phi", return = "sigma")
+CGC_vs_W_6.6_phi = CGC(Q2 = 6.6, W = CGC_W_phi, meson = "phi", return = "sigma")
+CGC_vs_W_15.8_phi = CGC(Q2 = 15.8, W = CGC_W_phi, meson = "phi", return = "sigma")
+
+bCGC_W_phi = c(35, 60, 80, 90, 100, 125, 160)
+
+bCGC_vs_W_2.4_phi = bCGC(Q2 = 2.4, W = bCGC_W_phi, meson = "phi", return = "sigma")
+bCGC_vs_W_3.8_phi = bCGC(Q2 = 3.8, W = bCGC_W_phi, meson = "phi", return = "sigma")
+bCGC_vs_W_6.5_phi = bCGC(Q2 = 6.5, W = bCGC_W_phi, meson = "phi", return = "sigma")
+bCGC_vs_W_13.0_phi = bCGC(Q2 = 13.0, W = bCGC_W_phi, meson = "phi", return = "sigma")
+
+bCGC_vs_W_3.3_phi = bCGC(Q2 = 3.3, W = bCGC_W_phi, meson = "phi", return = "sigma")
+bCGC_vs_W_6.6_phi = bCGC(Q2 = 6.6, W = bCGC_W_phi, meson = "phi", return = "sigma")
+bCGC_vs_W_15.8_phi = bCGC(Q2 = 15.8, W = bCGC_W_phi, meson = "phi", return = "sigma")
+
+```
+
+#Experimental Data
+
+Import the data from the Excel files in the <span style="color:blue;"><tt>Data</tt></span> folder. The data is put into R data frames with the following structure:
+
+Data[,1]                                    |Data[,2]                                                 |Data[,3]          |Data[,4]
+--------------------------------------------|---------------------------------------------------------|------------------|------------------
+<tt>\$W</tt>, <tt>\$Q2</tt>, or <tt>\$t</tt>|<tt>\$d_sigma</tt>, <tt>\$sigma</tt>, or <tt>\$ratio</tt>|<tt>\$pos_err</tt>|<tt>\$neg_err</tt>
+
+The values of <tt>pos_err</tt> and <tt>neg_err</tt> are not the values of the errors, but are the values of the best estimates plus and minus the errors (statistical and systematic). This is so that the <tt>arrows()</tt> function can be used to draw error bars in the plots.
+
+##Rho Data
+
+```{r}
+
+# d_sigma vs t
+
+# Reference [8], Table 26
+H1_2010_rho_d_sigma_3.3 = data.frame(read_excel("H1_2010_rho_d_sigma.xlsx", range = "A1:D8", col_names = TRUE))
+H1_2010_rho_d_sigma_6.6 = data.frame(read_excel("H1_2010_rho_d_sigma.xlsx", range = "A9:D16", col_names = TRUE))
+H1_2010_rho_d_sigma_11.5 = data.frame(read_excel("H1_2010_rho_d_sigma.xlsx", range = "A17:D24", col_names = TRUE))
+H1_2010_rho_d_sigma_17.4 = data.frame(read_excel("H1_2010_rho_d_sigma.xlsx", range = "A25:D32", col_names = TRUE))
+H1_2010_rho_d_sigma_33.0 = data.frame(read_excel("H1_2010_rho_d_sigma.xlsx", range = "A33:D40", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# sigma vs Q2
+
+# Reference [8], Table 14
+H1_2010_rho_sigma = data.frame(read_excel("H1_2010_rho_sigma.xlsx", col_names = TRUE))
+
+# Reference [10], Table 4
+ZEUS_2007_rho_sigma = data.frame(read_excel("ZEUS_2007_rho_sigma.xlsx", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# sigma vs W
+
+# Reference [8], Table 21
+H1_2010_rho_sigma_3.3 = data.frame(read_excel("H1_2010_rho_sigma_W.xlsx", range = "A1:D6", col_names = TRUE))
+H1_2010_rho_sigma_6.6 = data.frame(read_excel("H1_2010_rho_sigma_W.xlsx", range = "A7:D12", col_names = TRUE))
+H1_2010_rho_sigma_11.9 = data.frame(read_excel("H1_2010_rho_sigma_W.xlsx", range = "A13:D18", col_names = TRUE))
+H1_2010_rho_sigma_19.5 = data.frame(read_excel("H1_2010_rho_sigma_W.xlsx", range = "A19:D24", col_names = TRUE))
+H1_2010_rho_sigma_35.6 = data.frame(read_excel("H1_2010_rho_sigma_W.xlsx", range = "A25:D30", col_names = TRUE))
+
+# Reference [10], Table 5
+ZEUS_2007_rho_sigma_2.4 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A1:D6", col_names = TRUE))
+ZEUS_2007_rho_sigma_3.7 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A7:D12", col_names = TRUE))
+ZEUS_2007_rho_sigma_6.0 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A13:D18", col_names = TRUE))
+ZEUS_2007_rho_sigma_8.3 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A19:D24", col_names = TRUE))
+ZEUS_2007_rho_sigma_13.5 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A25:D31", col_names = TRUE))
+ZEUS_2007_rho_sigma_32.0 = data.frame(read_excel("ZEUS_2007_rho_sigma_W.xlsx", range = "A32:D39", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# ratio vs Q2
+
+# Reference [7], Table 7
+H1_2000_rho_ratio = data.frame(read_excel("H1_2000_rho_ratio.xlsx", col_names = TRUE))
+
+# Reference [8], Table 49
+H1_2010_rho_ratio = data.frame(read_excel("H1_2010_rho_ratio.xlsx", col_names = TRUE))
+
+# Reference [10], Table 7
+ZEUS_2007_rho_ratio = data.frame(read_excel("ZEUS_2007_rho_ratio.xlsx", col_names = TRUE))
+
+```
+
+##Phi Data
+
+```{r, eval = FALSE}
+
+# d_sigma vs t
+
+# Reference [8], Table 28
+H1_2010_phi_d_sigma_3.3 = data.frame(read_excel("H1_2010_phi_d_sigma.xlsx", range = "A1:D8", col_names = TRUE))
+H1_2010_phi_d_sigma_6.6 = data.frame(read_excel("H1_2010_phi_d_sigma.xlsx", range = "A9:D16", col_names = TRUE))
+H1_2010_phi_d_sigma_15.8 = data.frame(read_excel("H1_2010_phi_d_sigma.xlsx", range = "A17:D24", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# sigma vs Q2
+
+# Reference [8], Table 16
+H1_2010_phi_sigma = data.frame(read_excel("H1_2010_phi_sigma.xlsx", col_names = TRUE))
+
+# Reference [9], Table 3
+ZEUS_2005_phi_sigma = data.frame(read_excel("ZEUS_2005_phi_sigma.xlsx", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# sigma vs W
+
+# Reference [9], Table 1
+ZEUS_2005_phi_sigma_2.4 = data.frame(read_excel("ZEUS_2005_phi_sigma_W.xlsx", range = "A1:D8", col_names = TRUE))
+ZEUS_2005_phi_sigma_3.8 = data.frame(read_excel("ZEUS_2005_phi_sigma_W.xlsx", range = "A9:D15", col_names = TRUE))
+ZEUS_2005_phi_sigma_6.5 = data.frame(read_excel("ZEUS_2005_phi_sigma_W.xlsx", range = "A16:D22", col_names = TRUE))
+ZEUS_2005_phi_sigma_13.0 = data.frame(read_excel("ZEUS_2005_phi_sigma_W.xlsx", range = "A23:D29", col_names = TRUE))
+
+# Reference [8], Table 23
+H1_2010_phi_sigma_3.3 = data.frame(read_excel("H1_2010_phi_sigma_W.xlsx", range = "A1:D6", col_names = TRUE))
+H1_2010_phi_sigma_6.6 = data.frame(read_excel("H1_2010_phi_sigma_W.xlsx", range = "A7:D12", col_names = TRUE))
+H1_2010_phi_sigma_15.8 = data.frame(read_excel("H1_2010_phi_sigma_W.xlsx", range = "A13:D18", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# ratio vs Q2
+
+# Reference [8], Table 49
+H1_2010_phi_ratio = data.frame(read_excel("H1_2010_phi_ratio.xlsx", col_names = TRUE))
+
+# Reference [9], Table 6
+ZEUS_2005_phi_ratio = data.frame(read_excel("ZEUS_2005_phi_ratio.xlsx", col_names = TRUE))
+
+```
+
+#Rho Plots
+
+##Differential Cross Section vs |t|
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 10*1.097542, fig.height = 8}
+
+# To output plots to PDFs, use the pdf() function:
+# pdf("Rho - Differential Cross Section vs t.pdf", width = 10*1.097542, height = 8)
+
+par(mfrow = c(3, 2), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 3.3
+
+plot(0, 1, ann = FALSE, xaxt = "n", xlim = c(0, 0.5), ylim = c(0, 2500), col = "white")
+title("Q² = 3.3 GeV²", line = -1.5)
+lines(CGC_t, CGC_d_sigma_3.3_rho$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t, bCGC_d_sigma_3.3_rho$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_d_sigma_3.3$t, H1_2010_rho_d_sigma_3.3$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_d_sigma_3.3$t, H1_2010_rho_d_sigma_3.3$pos_error, H1_2010_rho_d_sigma_3.3$t, H1_2010_rho_d_sigma_3.3$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 6.6
+
+plot(0, 1, ann = FALSE, xaxt = "n", xlim = c(0, 0.5), ylim = c(0, 500), col = "white")
+title("Q² = 6.6 GeV²", line = -1.5)
+lines(CGC_t, CGC_d_sigma_6.6_rho$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t, bCGC_d_sigma_6.6_rho$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_d_sigma_6.6$t, H1_2010_rho_d_sigma_6.6$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_d_sigma_6.6$t, H1_2010_rho_d_sigma_6.6$pos_error, H1_2010_rho_d_sigma_6.6$t, H1_2010_rho_d_sigma_6.6$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+legend(0.34, 500, c("H1 (2010)", "CGC", "b-CGC"), lty = c(0, 1, 2), lwd = c(NA_integer_, 4, 3), pch = c(17, NA_integer_, NA_integer_), col = c("red", "grey", "black"))
+
+# Q2 = 11.5
+
+plot(0, 1, ann = FALSE, xaxt = "n", xlim = c(0, 0.5), ylim = c(0, 220), col = "white")
+title("Q² = 11.5 GeV²", line = -1.5)
+lines(CGC_t, CGC_d_sigma_11.5_rho$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t, bCGC_d_sigma_11.5_rho$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_d_sigma_11.5$t, H1_2010_rho_d_sigma_11.5$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_d_sigma_11.5$t, H1_2010_rho_d_sigma_11.5$pos_error, H1_2010_rho_d_sigma_11.5$t, H1_2010_rho_d_sigma_11.5$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 17.4
+
+plot(0, 1, ann = FALSE, xlim = c(0, 0.5), ylim = c(0, 60), col = "white")
+title("Q² = 17.4 GeV²", line = -1.5)
+lines(CGC_t, CGC_d_sigma_17.4_rho$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t, bCGC_d_sigma_17.4_rho$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_d_sigma_17.4$t, H1_2010_rho_d_sigma_17.4$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_d_sigma_17.4$t, H1_2010_rho_d_sigma_17.4$pos_error, H1_2010_rho_d_sigma_17.4$t, H1_2010_rho_d_sigma_17.4$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 33.0
+
+plot(0, 1, ann = FALSE, xlim = c(0, 0.5), ylim = c(0, 9), col = "white")
+title("Q² = 33.0 GeV²", line = -1.5)
+lines(CGC_t, CGC_d_sigma_33.0_rho$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t, bCGC_d_sigma_33.0_rho$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_d_sigma_33.0$t, H1_2010_rho_d_sigma_33.0$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_d_sigma_33.0$t, H1_2010_rho_d_sigma_33.0$pos_error, H1_2010_rho_d_sigma_33.0$t, H1_2010_rho_d_sigma_33.0$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+mtext("|t| [GeV²]", 1, 3, outer = TRUE)
+mtext(expression("d"*sigma*" / dt  [nb / GeV²]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_d_sigma_3.3_rho
+CGC_d_sigma_6.6_rho
+CGC_d_sigma_11.5_rho
+CGC_d_sigma_17.4_rho
+CGC_d_sigma_33.0_rho
+
+# sigma and ratio are 0 in the b-CGC data frames because the return argument was not specified when the bCGC() function was called
+# This is because the calculation of these values is not needed, and d_sigma is calculated much more quickly when it is avoided
+
+bCGC_d_sigma_3.3_rho
+bCGC_d_sigma_6.6_rho
+bCGC_d_sigma_11.5_rho
+bCGC_d_sigma_17.4_rho
+bCGC_d_sigma_33.0_rho
+
+```
+
+##Cross Section vs Q²
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 6*1.097542, fig.height = 6, eval = FALSE}
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 1, pch = 21, col = "white", bg = "white", xlim = c(1, 100), ylim = c(0.01, 1000), xlab = "Q² [GeV²]", ylab = expression(sigma*" [nb]"), log = "y", axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"))
+axis(2, at = c("0.01", "0.1", "1", "10", "100", "1000"), labels = c("0.01", "0.1", "1", "10", "100", "1000"), las = 1)
+legend(70.1, 1280, c("H1 (2010)", "ZEUS (2007)", "CGC", "b-CGC"), lty = c(0, 0, 1, 2), pch = c(17, 19, NA_integer_, NA_integer_), col = c("red", "blue", "grey", "black"), lwd = c(NA_integer_, NA_integer_, 4, 3), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2_rho, CGC_sigma_vs_Q2_rho, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2_rho, bCGC_sigma_vs_Q2_rho, col = "black", lty = 2, lwd = 3)
+
+# Add experimental data
+
+points(H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$sigma, pch = 24, col = "red", bg = "red")
+points(ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$sigma, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$pos_error, H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$pos_error, ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Print the data frames
+
+CGC_vs_Q2_rho
+
+bCGC_vs_Q2_rho
+
+```
+
+##Cross Section vs W
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 8*1.097542, fig.height = 8, eval = FALSE}
+
+par(mfrow = c(3, 2), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 0
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(1000, 20000))
+axis(2, at = c(5000, 10000, 15000, 20000))
+title("Q² = 0 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_0_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_0_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(71.7, 11200, pch = 21, col = "blue", bg = "blue")
+arrows(71.7, 12400, 71.7, 9900, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 3.3
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(150, 650))
+axis(2, at = c(200, 400, 600))
+title("Q² = 3.3 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_3.3_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_3.3_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_sigma_3.3$W, H1_2010_rho_sigma_3.3$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_sigma_3.3$W, H1_2010_rho_sigma_3.3$pos_error, H1_2010_rho_sigma_3.3$W, H1_2010_rho_sigma_3.3$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+legend(113, 650, c("H1 (2010)", "ZEUS (1998)", "CGC", "b-CGC"), lty = c(0, 0, 1, 2), lwd = c(NA_integer_, NA_integer_, 4, 3), pch = c(17, 19, NA_integer_, NA_integer_), col = c("red", "blue", "grey", "black"), bg = rgb(1, 1, 1, 0.8))
+
+# Q2 = 6.6
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(60, 140))
+axis(2, at = c(80, 120))
+title("Q² = 6.6 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_6.6_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_6.6_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_sigma_6.6$W, H1_2010_rho_sigma_6.6$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_sigma_6.6$W, H1_2010_rho_sigma_6.6$pos_error, H1_2010_rho_sigma_6.6$W, H1_2010_rho_sigma_6.6$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 11.9
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(15, 45))
+axis(2, at = c(20, 30, 40))
+title("Q² = 11.9 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_11.9_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_11.9_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_sigma_11.9$W, H1_2010_rho_sigma_11.9$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_sigma_11.9$W, H1_2010_rho_sigma_11.9$pos_error, H1_2010_rho_sigma_11.9$W, H1_2010_rho_sigma_11.9$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 19.5
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(0, 20))
+axis(1, at = c(40, 80, 120, 160, 200))
+axis(2, at = c(6, 12, 18))
+title("Q² = 19.5 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_19.5_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_19.5_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_sigma_19.5$W, H1_2010_rho_sigma_19.5$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_sigma_19.5$W, H1_2010_rho_sigma_19.5$pos_error, H1_2010_rho_sigma_19.5$W, H1_2010_rho_sigma_19.5$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 35.6
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 195), ylim = c(0, 5))
+axis(1, at = c(40, 80, 120, 160, 200))
+axis(2, at = c(0, 2, 4))
+title("Q² = 35.6 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_35.6_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_35.6_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_rho_sigma_35.6$W, H1_2010_rho_sigma_35.6$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_rho_sigma_35.6$W, H1_2010_rho_sigma_35.6$pos_error, H1_2010_rho_sigma_35.6$W, H1_2010_rho_sigma_35.6$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+mtext("W [GeV]", 1, 3, outer = TRUE)
+mtext(expression(sigma*" [nb]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_vs_W_0_rho
+CGC_vs_W_3.3_rho
+CGC_vs_W_6.6_rho
+CGC_vs_W_11.9_rho
+CGC_vs_W_19.5_rho
+CGC_vs_W_35.6_rho
+
+bCGC_vs_W_0_rho
+bCGC_vs_W_3.3_rho
+bCGC_vs_W_6.6_rho
+bCGC_vs_W_11.9_rho
+bCGC_vs_W_19.5_rho
+bCGC_vs_W_35.6_rho
+
+```
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 8*1.097542, fig.height = 8, eval = FALSE}
+
+par(mfrow = c(3, 2), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 2.4
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(400, 1000))
+axis(2, at = c(400, 600, 800, 1000))
+title("Q² = 2.4 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_2.4_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_2.4_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_2.4$W, ZEUS_2007_rho_sigma_2.4$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_2.4$W, ZEUS_2007_rho_sigma_2.4$pos_error, ZEUS_2007_rho_sigma_2.4$W, ZEUS_2007_rho_sigma_2.4$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 3.7
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(200, 500))
+axis(2, at = c(200, 300, 400, 500))
+title("Q² = 3.7 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_3.7_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_3.7_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_3.7$W, ZEUS_2007_rho_sigma_3.7$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_3.7$W, ZEUS_2007_rho_sigma_3.7$pos_error, ZEUS_2007_rho_sigma_3.7$W, ZEUS_2007_rho_sigma_3.7$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+legend(100, 500, c("ZEUS (2007)", "CGC", "b-CGC"), lty = c(0, 1, 2), lwd = c(NA_integer_, 4, 3), pch = c(19, NA_integer_, NA_integer_), col = c("blue", "grey", "black"), bg = rgb(1, 1, 1, 0.8))
+
+# Q2 = 6.0
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(75, 175))
+axis(2, at = c(100, 150))
+title("Q² = 6.0 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_6.0_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_6.0_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_6.0$W, ZEUS_2007_rho_sigma_6.0$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_6.0$W, ZEUS_2007_rho_sigma_6.0$pos_error, ZEUS_2007_rho_sigma_6.0$W, ZEUS_2007_rho_sigma_6.0$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 8.3
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(40, 120))
+axis(2, at = c(40, 80, 120))
+title("Q² = 8.3 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_8.3_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_8.3_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_8.3$W, ZEUS_2007_rho_sigma_8.3$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_8.3$W, ZEUS_2007_rho_sigma_8.3$pos_error, ZEUS_2007_rho_sigma_8.3$W, ZEUS_2007_rho_sigma_8.3$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 13.5
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(10, 50))
+axis(1, at = c(40, 80, 120, 160))
+axis(2, at = c(10, 20, 30, 40, 50))
+title("Q² = 13.5 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_13.5_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_13.5_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_13.5$W, ZEUS_2007_rho_sigma_13.5$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_13.5$W, ZEUS_2007_rho_sigma_13.5$pos_error, ZEUS_2007_rho_sigma_13.5$W, ZEUS_2007_rho_sigma_13.5$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 32.0
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 175), ylim = c(0, 5))
+axis(1, at = c(40, 80, 120, 160))
+axis(2, at = c(0, 2, 4))
+title("Q² = 32.0 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_rho, CGC_vs_W_32.0_rho$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_rho, bCGC_vs_W_32.0_rho$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2007_rho_sigma_32.0$W, ZEUS_2007_rho_sigma_32.0$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2007_rho_sigma_32.0$W, ZEUS_2007_rho_sigma_32.0$pos_error, ZEUS_2007_rho_sigma_32.0$W, ZEUS_2007_rho_sigma_32.0$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+mtext("W [GeV]", 1, 3, outer = TRUE)
+mtext(expression(sigma*" [nb]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_vs_W_2.4_rho
+CGC_vs_W_3.7_rho
+CGC_vs_W_6.0_rho
+CGC_vs_W_8.3_rho
+CGC_vs_W_13.5_rho
+CGC_vs_W_32.0_rho
+
+bCGC_vs_W_2.4_rho
+bCGC_vs_W_3.7_rho
+bCGC_vs_W_6.0_rho
+bCGC_vs_W_8.3_rho
+bCGC_vs_W_13.5_rho
+bCGC_vs_W_32.0_rho
+
+```
+
+##Ratio vs Q²
+
+```{r, results = 'hold', fig.show = 'hold', fig.align = 'center', eval = FALSE}
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 1, pch = 21, col = "white", bg = "white", xlim = c(1, 50), ylim = c(0.5, 11), xlab = "Q² [GeV²]", ylab = expression(sigma["L"]*" / "*sigma["T"]*""), axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50"))
+axis(2, at = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"), las = 1)
+legend(1, 11, c("H1 (2000)", "H1 (2010)", "ZEUS (2007)", "CGC", "b-CGC"), lty = c(0, 0, 0, 1, 2), pch = c(15, 17, 19, NA_integer_, NA_integer_), col = c("green", "red", "blue", "grey", "black"), lwd = c(NA_integer_, NA_integer_, NA_integer_, 4, 3), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2_rho, CGC_ratio_vs_Q2_rho, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2_rho, bCGC_ratio_vs_Q2_rho, col = "black", lty = 2, lwd = 3)
+
+# Add experimental data
+
+points(H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$ratio, pch = 22, col = "green", bg = "green")
+points(H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$ratio, pch = 24, col = "red", bg = "red")
+points(ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$ratio, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$pos_error, H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "green")
+arrows(H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$pos_error, H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$pos_error, ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Print the data frames
+
+CGC_vs_Q2_rho
+
+bCGC_vs_Q2_rho
+
+```
+
+#Phi Plots
+
+##Differential Cross Section vs |t|
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 6*1.097542, fig.height = 8, eval = FALSE}
+
+par(mfrow = c(3, 1), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 3.3
+
+plot(0, 1, ann = FALSE, xaxt = "n", log = "y", xlim = c(0, 0.5), ylim = c(10, 500), col = "white")
+title("Q² = 3.3 GeV²", line = -1.5)
+lines(CGC_t_phi, CGC_d_sigma_3.3_phi$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t_phi, bCGC_d_sigma_3.3_phi$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_d_sigma_3.3$t, H1_2010_phi_d_sigma_3.3$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_d_sigma_3.3$t, H1_2010_phi_d_sigma_3.3$pos_error, H1_2010_phi_d_sigma_3.3$t, H1_2010_phi_d_sigma_3.3$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+legend(0.355, 500, c("H1 (2010)", "CGC", "b-CGC"), lty = c(0, 1, 2), lwd = c(NA_integer_, 4, 3), pch = c(17, NA_integer_, NA_integer_), col = c("red", "grey", "black"))
+
+# Q2 = 6.6
+
+plot(0, 1, ann = FALSE, xaxt = "n", log = "y", xlim = c(0, 0.5), ylim = c(3, 110), col = "white")
+title("Q² = 6.6 GeV²", line = -1.5)
+lines(CGC_t_phi, CGC_d_sigma_6.6_phi$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t_phi, bCGC_d_sigma_6.6_phi$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_d_sigma_6.6$t, H1_2010_phi_d_sigma_6.6$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_d_sigma_6.6$t, H1_2010_phi_d_sigma_6.6$pos_error, H1_2010_phi_d_sigma_6.6$t, H1_2010_phi_d_sigma_6.6$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 15.8
+
+plot(0, 1, ann = FALSE, log = "y", xlim = c(0, 0.5), ylim = c(0.1, 50), col = "white")
+title("Q² = 15.8 GeV²", line = -1.5)
+lines(CGC_t_phi, CGC_d_sigma_15.8_phi$d_sigma, lwd = 4, col = "grey")
+lines(bCGC_t_phi, bCGC_d_sigma_15.8_phi$d_sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_d_sigma_15.8$t, H1_2010_phi_d_sigma_15.8$d_sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_d_sigma_15.8$t, H1_2010_phi_d_sigma_15.8$pos_error, H1_2010_phi_d_sigma_15.8$t, H1_2010_phi_d_sigma_15.8$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+mtext("|t| [GeV²]", 1, 3, outer = TRUE)
+mtext(expression("d"*sigma*" / dt  [nb / GeV²]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_d_sigma_3.3_phi
+CGC_d_sigma_6.6_phi
+CGC_d_sigma_15.8_phi
+
+bCGC_d_sigma_3.3_phi
+bCGC_d_sigma_6.6_phi
+bCGC_d_sigma_15.8_phi
+
+```
+
+##Cross Section vs Q²
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 6*1.097542, fig.height = 6, eval = FALSE}
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 0, pch = 21, col = "white", bg = "white", xlim = c(1, 50), ylim = c(0.05, 110), xlab = "Q² [GeV²]", ylab = expression(sigma*" [nb]"), log = "y", axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"))
+axis(2, at = c("0.01", "0.1", "1", "10", "100", "1000"), labels = c("0.01", "0.1", "1", "10", "100", "1000"), las = 1)
+legend(35.2, 133, c("H1 (2010)", "ZEUS (2005)", "CGC", "b-CGC"), lty = c(0, 0, 1, 2), pch = c(17, 19, NA_integer_, NA_integer_), col = c("red", "blue", "grey", "black"), lwd = c(NA_integer_, NA_integer_, 4, 3), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2_phi, CGC_sigma_vs_Q2_phi$sigma, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2_phi, bCGC_sigma_vs_Q2_phi$sigma, col = "black", lty = 2, lwd = 3)
+
+# Add experimental data
+
+points(H1_2010_phi_sigma$Q2, H1_2010_phi_sigma$sigma, pch = 24, col = "red", bg = "red")
+points(ZEUS_2005_phi_sigma$Q2, ZEUS_2005_phi_sigma$sigma, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2010_phi_sigma$Q2, H1_2010_phi_sigma$pos_error, H1_2010_phi_sigma$Q2, H1_2010_phi_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2005_phi_sigma$Q2, ZEUS_2005_phi_sigma$pos_error, ZEUS_2005_phi_sigma$Q2, ZEUS_2005_phi_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Print the data frames
+
+CGC_sigma_vs_Q2_phi
+
+bCGC_sigma_vs_Q2_phi
+
+```
+
+##Cross Section vs W
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 8*1.097542, fig.height = 6, eval = FALSE}
+
+par(mfrow = c(2, 2), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 2.4
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 140), ylim = c(40, 180))
+axis(2, at = c(40, 60, 80, 100, 120, 140, 160, 180))
+title("Q² = 2.4 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_2.4_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_2.4_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2005_phi_sigma_2.4$W, ZEUS_2005_phi_sigma_2.4$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2005_phi_sigma_2.4$W, ZEUS_2005_phi_sigma_2.4$pos_error, ZEUS_2005_phi_sigma_2.4$W, ZEUS_2005_phi_sigma_2.4$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 3.8
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 140), ylim = c(20, 80))
+axis(2, at = c(20, 40, 60, 80))
+title("Q² = 3.8 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_3.8_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_3.8_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2005_phi_sigma_3.8$W, ZEUS_2005_phi_sigma_3.8$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2005_phi_sigma_3.8$W, ZEUS_2005_phi_sigma_3.8$pos_error, ZEUS_2005_phi_sigma_3.8$W, ZEUS_2005_phi_sigma_3.8$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+legend(84, 80, c("ZEUS (2005)", "CGC", "b-CGC"), lty = c(0, 1, 2), lwd = c(NA_integer_, 4, 3), pch = c(19, NA_integer_, NA_integer_), col = c("blue", "grey", "black"), bg = rgb(1, 1, 1, 0.8))
+
+# Q2 = 6.5
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 140), ylim = c(5, 35))
+axis(1, at = c(40, 60, 80, 100, 120, 140))
+axis(2, at = c(5, 10, 15, 20, 25, 30, 35))
+title("Q² = 6.5 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_6.5_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_6.5_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2005_phi_sigma_6.5$W, ZEUS_2005_phi_sigma_6.5$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2005_phi_sigma_6.5$W, ZEUS_2005_phi_sigma_6.5$pos_error, ZEUS_2005_phi_sigma_6.5$W, ZEUS_2005_phi_sigma_6.5$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Q2 = 13.0
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(35, 140), ylim = c(4, 8))
+axis(1, at = c(40, 60, 80, 100, 120, 140))
+axis(2, at = c(4, 5, 6, 7, 8))
+title("Q² = 13.0 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_13.0_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_13.0_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(ZEUS_2005_phi_sigma_13.0$W, ZEUS_2005_phi_sigma_13.0$sigma, pch = 21, col = "blue", bg = "blue")
+arrows(ZEUS_2005_phi_sigma_13.0$W, ZEUS_2005_phi_sigma_13.0$pos_error, ZEUS_2005_phi_sigma_13.0$W, ZEUS_2005_phi_sigma_13.0$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+mtext("W [GeV]", 1, 3, outer = TRUE)
+mtext(expression(sigma*" [nb]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_vs_W_2.4_phi
+CGC_vs_W_3.8_phi
+CGC_vs_W_6.5_phi
+CGC_vs_W_13.0_phi
+
+bCGC_vs_W_2.4_phi
+bCGC_vs_W_3.8_phi
+bCGC_vs_W_6.5_phi
+bCGC_vs_W_13.0_phi
+
+```
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 6*1.097542, fig.height = 8, eval = FALSE}
+
+par(mfrow = c(3, 1), oma = c(5, 5, 2, 2), mar = c(0, 3.2, 0, 0), cex = 1, las = 1)
+
+# Q2 = 3.3
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 170), ylim = c(20, 100))
+axis(2, at = c(20, 40, 60, 80, 100))
+title("Q² = 3.3 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_3.3_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_3.3_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_sigma_3.3$W, H1_2010_phi_sigma_3.3$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_sigma_3.3$W, H1_2010_phi_sigma_3.3$pos_error, H1_2010_phi_sigma_3.3$W, H1_2010_phi_sigma_3.3$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+legend(132, 100, c("H1 (2010)", "CGC", "b-CGC"), lty = c(0, 1, 2), lwd = c(NA_integer_, 4, 3), pch = c(17, NA_integer_, NA_integer_), col = c("red", "grey", "black"), bg = rgb(1, 1, 1, 0.8))
+
+# Q2 = 6.6
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 170), ylim = c(5, 30))
+axis(2, at = c(5, 10, 15, 20, 25, 30))
+title("Q² = 6.6 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_6.6_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_6.6_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_sigma_6.6$W, H1_2010_phi_sigma_6.6$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_sigma_6.6$W, H1_2010_phi_sigma_6.6$pos_error, H1_2010_phi_sigma_6.6$W, H1_2010_phi_sigma_6.6$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+# Q2 = 15.8
+
+plot(0, 0, ann = FALSE, xaxt = "n", yaxt = "n", xlim = c(40, 170), ylim = c(1, 12))
+axis(1, at = c(40, 60, 80, 100, 120, 140, 160))
+axis(2, at = c(2, 4, 6, 8, 10, 12))
+title("Q² = 15.8 GeV²", line = -10, adj = 0.9)
+lines(CGC_W_phi, CGC_vs_W_15.8_phi$sigma, lwd = 4, col = "grey")
+lines(bCGC_W_phi, bCGC_vs_W_15.8_phi$sigma, lwd = 3, col = "black", lty = 2)
+points(H1_2010_phi_sigma_15.8$W, H1_2010_phi_sigma_15.8$sigma, pch = 24, col = "red", bg = "red")
+arrows(H1_2010_phi_sigma_15.8$W, H1_2010_phi_sigma_15.8$pos_error, H1_2010_phi_sigma_15.8$W, H1_2010_phi_sigma_15.8$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+
+mtext("W [GeV]", 1, 3, outer = TRUE)
+mtext(expression(sigma*" [nb]"), 2, 1, outer = TRUE, las = 0)
+
+# Print the data frames
+
+CGC_vs_W_3.3_phi
+CGC_vs_W_6.6_phi
+CGC_vs_W_15.8_phi
+
+bCGC_vs_W_3.3_phi
+bCGC_vs_W_6.6_phi
+bCGC_vs_W_15.8_phi
+
+```
+
+##Ratio vs Q²
+
+```{r, fig.show = 'hold', fig.align = 'center', fig.width = 6*1.097542, fig.height = 6, eval = FALSE}
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 1, pch = 21, col = "white", bg = "white", xlim = c(1, 25), ylim = c(0.5, 11), xlab = "Q² [GeV²]", ylab = expression(sigma["L"]*" / "*sigma["T"]*""), axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50"))
+axis(2, at = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"), las = 1)
+legend(1, 11, c("H1 (2010)", "ZEUS (2005)", "CGC", "b-CGC"), lty = c(0, 0, 1, 2), pch = c(17, 19, NA_integer_, NA_integer_), col = c("red", "blue", "grey", "black"), lwd = c(NA_integer_, NA_integer_, 4, 3), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2_phi, CGC_ratio_vs_Q2_phi$ratio, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2_phi, bCGC_ratio_vs_Q2_phi$ratio, col = "black", lty = 2, lwd = 3)
+
+# Add experimental data
+
+points(H1_2010_phi_ratio$Q2, H1_2010_phi_ratio$ratio, pch = 24, col = "red", bg = "red")
+points(ZEUS_2005_phi_ratio$Q2, ZEUS_2005_phi_ratio$ratio, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2010_phi_ratio$Q2, H1_2010_phi_ratio$pos_error, H1_2010_phi_ratio$Q2, H1_2010_phi_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2005_phi_ratio$Q2, ZEUS_2005_phi_ratio$pos_error, ZEUS_2005_phi_ratio$Q2, ZEUS_2005_phi_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+# Print the data frames
+
+CGC_ratio_vs_Q2_phi
+
+bCGC_ratio_vs_Q2_phi
+
+```
+
+#Chi-Square Function
+
+This function can calculate reduced chi-square values for b-CGC cross sections using the formula for reduced chi-square:
+
+$$\tilde{\chi}^2=\frac{1}{d}\sum_i\frac{\left(T_i-E_i\right)^2}{T_i},$$
+where $d$ is the number of degrees of freedom (the number of data points minus the number of free parameters of the model), $T_i$ is the $i$th theoretical value, and $E_i$ is the $i$th experimental value.
+
+This function makes use of the structure of the data frames that hold the H1 and ZEUS data:
+
+Data[,1]                                    |Data[,2]                                                 |Data[,3]          |Data[,4]
+--------------------------------------------|---------------------------------------------------------|------------------|------------------
+<tt>\$W</tt>, <tt>\$Q2</tt>, or <tt>\$t</tt>|<tt>\$d_sigma</tt>, <tt>\$sigma</tt>, or <tt>\$ratio</tt>|<tt>\$pos_err</tt>|<tt>\$neg_err</tt>
+
+```{r}
+
+chi_square = function (Data, Q2, W, meson) {
+  
+  # Create an empty vector to hold the summand values
+  
+  value = vector(mode = "double", length = length(Data))
+  
+  # Loop over all data points i
+  
+  for (i in seq_along(Data[, 1])) {
+    
+    # Print the i value to track progress
+    
+    print(i)
+    
+    # Determine whether the chi-square is for plots against Q2 or W
+    # Then select the corresponding Q2 or W value for the data point i
+    
+    if (length(Q2) - 1 > 0) {
+      
+      Q2_value = Q2[i]
+      W_value = W[i]
+      
+    } else {
+      
+      Q2_value = Q2[i]
+      W_value = W[i]
+      
+    }
+    
+    # Calculate expected values using the bCGC() function
+    # Then obtain errors from the data
+    # Data[,3] and Data[,4] are sums of sigma + statistical error + systematic error, so "- experimental" is needed
+    
+    experimental = Data[i, 2]
+    theoretical = bCGC(Q2_value, W_value, meson, return = "sigma")$sigma
+    error = ifelse(theoretical - experimental > 0, Data[i, 3] - experimental, Data[i, 4] - experimental)
+    
+    value[i] = ((theoretical - experimental)/error)**2
+    
+  }
+  
+  # Sum over all data points, and divide by the number of degrees of freedom
+  # Subtract 4 (not 5) to calculate the degrees of freedom, because B_CGC is fixed, not, free, in Reference [2]
+  # Return the reduced chi-square
+  
+  sum(value)/(length(Data[, 1]) - 4)
+  
+}
+
+```

@@ -1,0 +1,610 @@
+#b-SAT (with Grid)
+
+This file is written to calculate b-SAT predictions for rho on a Linux machine.
+
+The algorithm works by creating a grid of $x_{Bj}$ and $\mu$ values, evolving the gluon density using HOPPET for this finite number of values, then using the linear interpolation code in the <span style="color:blue;"><tt>Useful R Algorithms.Rmd</tt></span> (or <span style="color:blue;"><tt>.html</tt></span>) file to approximate values of $xg(x_{Bj},\ \mu)$ to use when integrating over $r$.
+
+It was found that this code was not a good way of evolving the gluon density, since a fine enough grid could not be created. In order to have a grid with fine enough spacings, millions of evolutions would be required. Since one evolution takes approximately one second, it would take months to produce the grid. The problem is similar to that explained in <span style="color:blue;"><tt>bSAT - Trapezoidal Plots.Rmd</tt></span> (or <span style="color:blue;"><tt>.html</tt></span>).
+
+##References and Libraries
+
+```{r}
+
+# References
+
+# [1]: M. Ahmady, R. Sandapen, and N. Sharma, Phys. Rev. D 94, 074018 (2016), arXiv:1605.07665v2 [hep-ph].
+# [2]: A. H. Rezaeian, and I. Schmidt, Phys. Rev. D 88, 074016 (2013), arXiv:1307.0825v3 [hep-ph].
+# [3]: A. H. Rezaeian, et al., Phys. Rev. D 87, 034002 (2013), arXiv:1212.2974v1 [hep-ph].
+# [4]: G. Watt, and H. Kowalski, Phys. Rev. D 78, 014016 (2008), arXiv:0712.2670v2 [hep-ph].
+# [5]: S. A. Tehrani, and A. N. Khorramian, J. High Energy Phys. 0707:048 (2007), arXiv:0705.2647v2 [hep-ph].
+# [6]: S. Bethke, G. Dissertori, and G. P. Salam, Quantum Chromodynamics (2015), PDG.
+
+# References for experimental data
+
+# [7]:  C. Adloff et al. (H1 Collaboration), Eur. Phys. J. C 13, 371 (2000).
+# [8]:  F. D. Aaron et al. (H1 Collaboration), J. High Energy Phys. 05 (2010) 032.
+# [9]:  S. Chekanov et al. (ZEUS Collaboration), Nucl. Phys. B718, 3 (2005), arXiv:hep-ex/0504010.
+# [10]: S. Chekanov et al. (ZEUS Collaboration), PMC Phys. A 1, 6 (2007).
+
+# Libraries
+
+library(cubature) # For adaptIntegrate()
+library(memoise)  # To cache variables using the memoise() function to make repeated calculations faster
+library(compiler) # To compile functions using cmpfun() to make them faster
+library(readxl)   # To import experimental data from excel spreadsheets
+
+```
+
+##Constants and Parameters
+
+```{r}
+
+# Define Bessel functions for shorthand
+
+K = function (input) { besselK(input, 0) }
+J = function (input) { besselJ(input, 0) }
+
+# Constants
+
+q_e        = sqrt(4*pi*(1/137)) # The elementary charge
+kappa      = 0.54               # The mass scale
+Lambda_QCD = 0.156              # For the coupling constant
+N_c        = 3                  # The number of colours
+n_f        = 4                  # The number of active flavours
+
+# Equations (9.3) from Reference [6]
+
+b_0 = (33 - 2*n_f)/(12*pi)                                  # The one-loop beta function coefficient
+b_1 = (153 - 19*n_f)/(24*(pi**2))                           # The two-loop beta function coefficient
+b_2 = (2857 - (5033/9)*n_f + (325/27)*n_f**2)/(128*(pi**3)) # The three-loop beta function coefficient
+
+# b-SAT model parameters from Reference [3], Table 1
+
+#                   A_g    lambda_g mu_nought   B_G C
+bSAT_parameters = c(2.308, 0.058,   sqrt(1.51), 4,  4)
+
+A_g       = bSAT_parameters[1]
+lambda_g  = bSAT_parameters[2]
+mu_nought = bSAT_parameters[3]
+B_G       = bSAT_parameters[4]
+bSAT_C    = bSAT_parameters[5]
+
+# Meson-dependent constants (for phi)
+
+M = 1.020
+m = 0.14
+e = 0.333333
+
+```
+
+##The Normalisation Constants
+
+```{r}
+
+# Longitudinal normalisation constant function
+
+Normalise_L = function (variables) {
+  
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*(r**2)*x*(1 - x)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr2 = (kappa**2)*((x*(1 - x))**(3/2))*((kappa**2)*(r**2)*x*(1 - x) - 2)*exponent
+  
+  # Return the N_L integrand
+  
+  (1/2)*pi*r*((psi**2) + (2*(m**2)*(psi**2) - 2*psi*psi_dr2)/(x*(1 - x)*(M**2)) + ((m**4)*(psi**2) + (psi_dr2**2) - (2*(m**2)*psi*psi_dr2))/((x*(1 - x)*(M**2))**2))
+  
+}
+
+# A function to calculate the transverse normalisation constant integrand
+
+Normalise_T = function (variables) {
+  
+  # Integration variables
+  
+  x = variables[1]
+  r = variables[2]
+  
+  # Wavefunctions from Equations (15) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*(((kappa**2)*x*(1 - x)*(r**2)) + ((m**2)/((kappa**2)*x*(1 - x)))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Return the N_T integrand
+  
+  2*pi*r*(1/(4*(x**2)*((1 - x)**2)))*(((x**2 + (1 - x)**2)*(psi_dr**2)) + (m*psi)**2)
+  
+}
+
+Normalise_L = cmpfun(Normalise_L)
+Normalise_T = cmpfun(Normalise_T)
+
+# Longitudinal and transverse normalisation constants
+# The upper limits of 25 and 50 were chosen based on plots of Normalise_L() and Normalise_T() against x and r
+
+N_L = 1/sqrt(adaptIntegrate(Normalise_L, lowerLimit = c(0, 0), upperLimit = c(1, 25))$integral)
+N_T = 1/sqrt(adaptIntegrate(Normalise_T, lowerLimit = c(0, 0), upperLimit = c(1, 50))$integral)
+
+```
+
+##The PDF Grid
+
+```{r, eval = FALSE}
+
+# Set the working directory to /Codes/hoppet-1.2.0/example_f90
+# This is so that data can be written to files in the correct folder for HOPPET to access
+
+setwd("~/Codes/Hoppet/example_f90")
+
+# Export the initial PDF parameters to a file called "parameters.txt"
+# There is a line in HOPPET that reads these parameters in from this file
+
+outfile = c(A_g, lambda_g)
+write(outfile, file = "parameters.txt")
+
+# Define the grid points in x and mu
+
+x_grid  = seq(from = 0.0001, to = 0.02, by = 0.0001)
+mu_grid = c(seq(mu_nought, 2, 0.01), seq(5, 50, 2))
+
+# Export the x spacings into a file called "heralhc_xvals.txt"
+
+write(x_grid, file = "heralhc_xvals.txt", ncolumns = length(x_grid))
+
+# Declare a matrix to store the PDF that HOPPET will produce
+
+pdf_grid = matrix(nrow = length(x_grid), ncol = length(mu_grid))
+
+# Run HOPPET
+# Do the evolution for all values of mu in mu_grid
+# Store the PDF grid that HOPPET returns in pdf_grid
+
+for (j in seq(1, length(mu_grid))) {
+  
+  mu = mu_grid[j]
+  write(c(mu_nought, mu), file = "mu.txt")
+  
+  pdf_grid[, j] = as.numeric(system("./tabulation_example", intern = TRUE))
+  
+}
+
+# The grid has now been created and filled
+# The working directory has been automatically reset
+# The grid can be used in the A_L() and A_T() functions by calling the pdf_grid matrix
+# This part of the code does not have to be run again
+
+```
+
+##The Imaginary Scattering Amplitudes
+
+```{r}
+
+# Longitudinal imaginary scattering amplitude function
+
+A_L = function(variables, x_Bj, Q2, t) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Equation (16) from Reference [3]
+  # Define mu rather than mu2, because HOPPET evolves with mu
+  
+  mu = sqrt(bSAT_C/(r**2) + mu_nought**2)
+  
+  # Find the position i of the tabulated x value (in the grid) that the x value is closest to
+  # Find the position j of the tabulated mu value (in the grid) that this mu value is closest to
+  
+  i = which.min(abs(x_grid - x_Bj))
+  j = which.min(abs(mu_grid - mu))
+  
+  # Interpolate linearly between the grid points (i, j) and (i +/- 1, j)
+  # Which points it uses depends on whether x_Bj is rounded up or down for the grid point approximation
+  
+  if (x_grid[i] - x_Bj < 0) {
+    
+    slope = (pdf_grid[i + 1, j] - pdf_grid[i, j])/(x_grid[i + 1] - x_grid[i])
+    
+  } else {
+    
+    slope = (pdf_grid[i - 1, j] - pdf_grid[i, j])/(x_grid[i - 1] - x_grid[i])
+    
+  }
+  
+  intercept = pdf_grid[i, j] - slope*x_grid[i]
+  
+  # Calculate the approximation of the evolved PDF value for this x and r
+  
+  xg = slope*x_grid[i] + intercept
+  
+  # Equation (9.5) from Reference [6]
+  
+  t_r = log((mu/Lambda_QCD)**2)
+  alpha_s = (1/(b_0*t_r))
+  
+  # Variable-dependent equations
+  
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)           # Equation (8) from Reference [1]
+  T_G     = (1/(2*pi*B_G))*exp(-(b**2)/(2*B_G)) # Equation (2.6) from Reference [3]
+  
+  # Equation (2.5) from Reference [3]
+  
+  N = 1 - exp(-(((pi**2)*(r**2))/(2*N_c))*(alpha_s * xg * T_G))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi     = sqrt(x*(1 - x))*exponent
+  psi_dr2 = ((x*(1 - x))**(3/2))*(kappa**2)*((r**2)*(kappa**2)*x*(1 - x) - 2)*exponent
+  
+  # The photon and the vector meson wavefunctions
+  
+  psi_p = sqrt(N_c/pi)*q_e*e*x*(1 - x)*sqrt(Q2)*(K(epsilon*r)/pi)
+  psi_V = (N_L/(2*sqrt(2)))*((1 + ((m**2)/(x*(1 - x)*(M**2))))*psi - (1/(x*(1 - x)*(M**2)))*psi_dr2)
+  
+  # Return the integrand for the longitudinal scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_p *                 # The photon wavefunction
+  psi_V *                 # The complex conjugate of the vector meson wavefunction
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+# Transverse imaginary amplitude function
+
+A_T = function(variables, x_Bj, Q2, t) {
+  
+  # Integration variables
+  
+  b = variables[1]
+  x = variables[2]
+  r = variables[3]
+  
+  # Equation (16) from Reference [3]
+  # Define mu rather than mu2, because HOPPET evolves with mu
+  
+  mu = sqrt(bSAT_C/(r**2) + mu_nought**2)
+  
+  # Find the position i of the tabulated x value (in the grid) that the x value is closest to
+  # Find the position j of the tabulated mu value (in the grid) that this mu value is closest to
+  
+  i = which.min(abs(x_grid - x_Bj))
+  j = which.min(abs(mu_grid - mu))
+  
+  # Interpolate linearly between the grid points (i, j) and (i +/- 1, j)
+  # Which points it uses depends on whether x_Bj is rounded up or down for the grid point approximation
+  
+  if (x_grid[i] - x_Bj < 0) {
+    
+    slope = (pdf_grid[i + 1, j] - pdf_grid[i, j])/(x_grid[i + 1] - x_grid[i])
+    
+  } else {
+    
+    slope = (pdf_grid[i - 1, j] - pdf_grid[i, j])/(x_grid[i - 1] - x_grid[i])
+    
+  }
+  
+  intercept = pdf_grid[i, j] - slope*x_grid[i]
+  
+  # Calculate the approximation of the evolved PDF value for this x and r
+  
+  xg = slope*x_grid[i] + intercept
+  
+  # Equation (9.5) from Reference [6]
+  
+  t_r = log((mu/Lambda_QCD)**2)
+  alpha_s = (1/(b_0*t_r))
+  
+  # Variable-dependent equations
+  
+  epsilon = sqrt(x*(1 - x)*Q2 + m**2)           # Equation (8) from Reference [1]
+  T_G     = (1/(2*pi*B_G))*exp(-(b**2)/(2*B_G)) # Equation (2.6) from Reference [3]
+  
+  # Equation (2.5) from Reference [3]
+  
+  N = 1 - exp(-(((pi**2)*(r**2))/(2*N_c))*(alpha_s * xg * T_G))
+  
+  # Wavefunctions from Equations (14) and (27) from Reference [1], simplified by hand
+  
+  exponent = exp((-1/2)*((kappa**2)*x*(1 - x)*r**2 + (m**2)/((kappa**2)*x*(1 - x))))
+  
+  psi = sqrt(x*(1 - x))*exponent
+  psi_dr = -((x*(1 - x))**(3/2))*(kappa**2)*r*exponent
+  
+  # Product of the photon wavefunction and the complex conjugate of the vector meson wavefunction
+  
+  psi_Vp = N_T*sqrt(N_c/(2*pi))*q_e*e*((x**2 + (1 - x)**2)*(-epsilon*(besselK(epsilon*r, 1))/(2*pi))*(psi_dr/(2*x*(1 - x))) + (m**2)*(K(epsilon*r)/(2*pi))*(psi/(2*x*(1 - x))))
+  
+  # Return the integrand for the transverse scattering amplitude
+  
+  2 *                     # Integrate x from 0 to 0.5
+  psi_Vp *                # The wavefunctions
+  2*N *                   # The dipole cross section
+  2*pi*r*J(x*r*sqrt(t)) * # The r Bessel function
+  2*pi*b*J(b*sqrt(t))     # The b Bessel function
+  
+}
+
+A_L = cmpfun(memoise(A_L))
+A_T = cmpfun(memoise(A_T))
+
+# Longitudinal imaginary scattering amplitude integration function
+
+IntA_L = function (x_Bj, Q2, t) {
+  
+  adaptIntegrate(A_L, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, tol = 0.5)$integral
+  
+}
+
+# Transverse imaginary scattering amplitude integration function
+
+IntA_T = function (x_Bj, Q2, t) {
+  
+  adaptIntegrate(A_T, lowerLimit = c(1e-15, 1e-15, 1e-15), upperLimit = c(5, 0.5, 20), x_Bj, Q2, t, tol = 0.5)$integral
+  
+}
+
+IntA_L = cmpfun(Vectorize(memoise(IntA_L)))
+IntA_T = cmpfun(Vectorize(memoise(IntA_T)))
+
+```
+
+##The Differential Cross Sections
+
+```{r}
+
+# Longitudinal differential cross section function
+
+d_sigma_L = function (t, Q2, W) {
+  
+  # Modified x_Bj for low Q2
+  
+  x_Bj = (Q2 + (M**2))/(Q2 + (W**2))
+  
+  # Real-part correction
+  
+  ImA_L_x = IntA_L(x_Bj, Q2, t)
+  ImA_L_h = IntA_L(x_Bj + 1e-15, Q2, t)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_L_x/ImA_L_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the longitudinal differential cross section
+  
+  (ImA_L_x**2) *              # Im(A_L) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+# Transverse differential cross section function
+
+d_sigma_T = function (t, Q2, W) {
+  
+  # Modified x_Bj for low Q2
+  
+  x_Bj = (Q2 + (M**2))/(Q2 + (W**2))
+  
+  # Real-part correction
+  
+  ImA_T_x = IntA_T(x_Bj, Q2, t)
+  ImA_T_h = IntA_T(x_Bj + 1e-15, Q2, t)
+  
+  # Limit definition of the derivative of x_Bj
+  
+  alpha = -x_Bj*(1/(1e-15))*log(abs(ImA_T_x/ImA_T_h)) # Alternative form of Equation (13) from Reference [1]
+  beta  = tan(pi*alpha/2)                             # Equation (13) from Reference [1]
+  
+  # Skewness term from Equation (14) from Reference [4]
+  
+  R_g = ((2**(2*alpha + 3))/(sqrt(pi)))*(gamma(alpha + (5/2))/gamma(alpha + 4))
+  
+  # Return the integrand for the transverse differential cross section
+  
+  (ImA_T_x**2) *              # Im(A_T) squared
+  (1/(16*pi))*(1 + beta**2) * # Real-part correction
+  ((R_g)**2) *                # Skewness term
+  3.89379e5                   # Convert to nanobarns
+  
+}
+
+d_sigma_L = cmpfun(Vectorize(memoise(d_sigma_L)))
+d_sigma_T = cmpfun(Vectorize(memoise(d_sigma_T)))
+
+```
+
+##The Cross Section and Ratio
+
+```{r}
+
+# Cross section and ratio function
+
+bSAT = function (Q2, W) {
+  
+  sigma_L = integrate(d_sigma_L, lower = 0, upper = 1, Q2, W, rel.tol = 0.1)$value
+  sigma_T = integrate(d_sigma_T, lower = 0, upper = 1, Q2, W, rel.tol = 0.1)$value
+	
+  sigma = sigma_T + 0.98*sigma_L
+  ratio = sigma_L/sigma_T
+  
+  # Return both values in a matrix
+  # Use bSAT(Q2, W)[1,] for only sigma
+  # Use bSAT(Q2, W)[2,] for only the ratio
+  
+  c(sigma, ratio)
+  
+}
+
+bSAT = cmpfun(Vectorize(memoise(bSAT)))
+
+```
+
+##Theoretical Calculations
+
+```{r, eval = FALSE}
+
+start = Sys.time()
+
+# Define the Q2 values at which to evaluate the cross section and ratio
+
+bSAT_Q2 = 40.5
+
+# Calculate the b-SAT predictions
+
+bSAT_vs_Q2 = bSAT(bSAT_Q2, 75)
+
+# Print how much time it took to do the computation
+
+Sys.time() - start
+
+```
+
+```{r, eval = FALSE}
+
+# Create vectors of CGC and b-CGC results to add to the plots
+# These numbers were calculated using the Vector Meson Production.Rmd file
+# They have been copied and pasted here so that those functions do not need to run
+
+CGC_Q2 = c(2.5, 5, 6, 7, 10.5, 20, 25, 27.5, 30.5, 35, 40, 50, 75, 100)
+bCGC_Q2 = c(2.5, 7.5, 30, 40, 50, 75, 100)
+
+# Cross Section
+
+CGC_sigma = c(533.88331042, 151.77546171, 103.53391327, 73.82881233, 28.19655142, 5.12731467, 2.68673139, 2.03137281, 1.47703014, 0.96427976, 0.63319957, 0.30579221, 0.07509027, 0.02572904)
+bCGC_sigma = c(611.56972389, 70.91628992, 2.13251575, 0.94645563, 0.49791175, 0.14698466, 0.06311221)
+
+# Ratio
+
+CGC_ratio = c(1.182848, 1.775761, 1.979994, 2.162773, 2.744085, 4.044346, 4.698437, 4.956604, 5.310326, 5.774742, 6.373109, 7.210540, 9.176184, 10.464534)
+bCGC_ratio = c(1.221070, 2.584364, 7.154170, 8.930552, 10.616710, 14.592281, 18.914043)
+
+```
+
+##Experimental Data
+
+```{r, eval = FALSE}
+
+# sigma vs Q2
+
+# Reference [8], Table 14
+H1_2010_rho_sigma = data.frame(read_excel("H1_2010_rho_sigma.xlsx", col_names = TRUE))
+
+# Reference [10], Table 4
+ZEUS_2007_rho_sigma = data.frame(read_excel("ZEUS_2007_rho_sigma.xlsx", col_names = TRUE))
+
+```
+
+```{r, eval = FALSE}
+
+# ratio vs Q2
+
+# Reference [7], Table 7
+H1_2000_rho_ratio = data.frame(read_excel("H1_2000_rho_ratio.xlsx", col_names = TRUE))
+
+# Reference [8], Table 49
+H1_2010_rho_ratio = data.frame(read_excel("H1_2010_rho_ratio.xlsx", col_names = TRUE))
+
+# Reference [10], Table 7
+ZEUS_2007_rho_ratio = data.frame(read_excel("ZEUS_2007_rho_ratio.xlsx", col_names = TRUE))
+
+```
+
+##Cross Section Plot
+
+```{r, eval = FALSE}
+
+# sigma vs Q2
+
+pdf("Rho - Cross Section vs Q2.pdf", width = 6*1.097542, height = 6)
+
+# Create the plot
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 1, pch = 21, col = "white", bg = "white", xlim = c(1, 100), ylim = c(0.01, 1000), xlab = "Q² [GeV²]", ylab = expression(sigma*" [nb]"), log = "y", axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"))
+axis(2, at = c("0.01", "0.1", "1", "10", "100", "1000"), labels = c("0.01", "0.1", "1", "10", "100", "1000"), las = 1)
+legend(70.1, 1280, c("H1 (2010)", "ZEUS (2007)", "CGC", "b-CGC", "b-SAT"), lty = c(0, 0, 1, 2, 3), pch = c(17, 19, NA_integer_, NA_integer_, NA_integer_), col = c("red", "blue", "grey", "black", "red"), lwd = c(NA_integer_, NA_integer_, 4, 3, 5), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2, CGC_sigma, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2, bCGC_sigma, col = "black", lty = 2, lwd = 3)
+lines(bSAT_Q2, bSAT_vs_Q2_rho[1,], col = "red", lty = 3, lwd = 5)
+
+# Add experimental data
+
+points(H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$sigma, pch = 24, col = "red", bg = "red")
+points(ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$sigma, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$pos_error, H1_2010_rho_sigma$Q2, H1_2010_rho_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$pos_error, ZEUS_2007_rho_sigma$Q2, ZEUS_2007_rho_sigma$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+```
+
+##Ratio Plot
+
+```{r, eval = FALSE}
+
+# Ratio vs Q2
+
+pdf("Rho - Ratio vs Q2.pdf", width = 6*1.097542, height = 6)
+
+# Create the plot
+
+par(mai = c(1.05, 1.05, 0.45, 0.40))
+plot(0, 1, pch = 21, col = "white", bg = "white", xlim = c(1, 50), ylim = c(0.5, 12), xlab = "Q² [GeV²]", ylab = expression(sigma["L"]*" / "*sigma["T"]*""), axes = FALSE)
+
+# Modify the plot features
+
+box(bty = "o")
+axis(1, at = c("0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50"))
+axis(2, at = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"), las = 1)
+legend(1, 12, c("H1 (2000)", "H1 (2010)", "ZEUS (2007)", "CGC", "b-CGC", "b-SAT"), lty = c(0, 0, 0, 1, 2, 3), pch = c(15, 17, 19, NA_integer_, NA_integer_, NA_integer_), col = c("green", "red", "blue", "grey", "black", "red"), lwd = c(NA_integer_, NA_integer_, NA_integer_, 4, 3, 5), bg = "white")
+
+# Add theoretical data
+
+lines(CGC_Q2, CGC_ratio, col = "grey", lty = 1, lwd = 4)
+lines(bCGC_Q2, bCGC_ratio, col = "black", lty = 2, lwd = 3)
+lines(bSAT_Q2, bSAT_vs_Q2_rho[2,], col = "red", lty = 3, lwd = 5)
+
+# Add experimental data
+
+points(H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$ratio, pch = 22, col = "green", bg = "green")
+points(H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$ratio, pch = 24, col = "red", bg = "red")
+points(ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$ratio, pch = 21, col = "blue", bg = "blue")
+
+# Add error bars
+
+arrows(H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$pos_error, H1_2000_rho_ratio$Q2, H1_2000_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "green")
+arrows(H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$pos_error, H1_2010_rho_ratio$Q2, H1_2010_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "red")
+arrows(ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$pos_error, ZEUS_2007_rho_ratio$Q2, ZEUS_2007_rho_ratio$neg_error, length = 0.04, angle = 90, code = 3, col = "blue")
+
+```

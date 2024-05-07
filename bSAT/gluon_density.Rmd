@@ -1,0 +1,266 @@
+# Gluon Density Evolution with DGLAP Notes
+
+```{r}
+
+# William Woodley (wwoodley@ualberta.ca)
+# 3 August 2018
+
+# References
+
+# [1]: M. Ahmady, R. Sandapen, and N. Sharma, Phys. Rev. D 94, 074018 (2016), arXiv:1605.07665v2 [hep-ph].
+# [2]: A. H. Rezaeian, and I. Schmidt, Phys. Rev. D 88, 074016 (2013), arXiv:1307.0825v3 [hep-ph].
+# [3]: A. H. Rezaeian, et al., Phys. Rev. D 87, 034002 (2013), arXiv:1212.2974v1 [hep-ph].
+# [4]: G. Watt, and H. Kowalski, Phys. Rev. D 78, 014016 (2008), arXiv:0712.2670v2 [hep-ph].
+# [5]: S. A. Tehrani, and A. N. Khorramian, J. High Energy Phys. 0707:048 (2007), arXiv:0705.2647v2 [hep-ph].
+# [6]: S. Bethke, G. Dissertori, and G. P. Salam, Quantum Chromodynamics (2015), PDG.
+
+# References for experimental data
+
+# [7]:  C. Adloff et al. (H1 Collaboration), Eur. Phys. J. C 13, 371 (2000).
+# [8]:  F. D. Aaron et al. (H1 Collaboration), J. High Energy Phys. 05 (2010) 032.
+# [9]:  S. Chekanov et al. (ZEUS Collaboration), Nucl. Phys. B718, 3 (2005), arXiv:hep-ex/0504010.
+# [10]: S. Chekanov et al. (ZEUS Collaboration), PMC Phys. A 1, 6 (2007).
+
+# Libraries
+
+library(memoise)      # To cache variables using the memoise() function to make repeated calculations faster
+library(orthopolynom) # To compute Jacobi polynomials using jacobi.p.polnomials()
+
+```
+
+#Gluon Density Function
+
+```{r}
+
+G = function (x_Bj, mu, alpha, beta, N_max) {
+  
+  # Constants
+  
+  Lambda_QCD = 0.156                # For the coupling constant
+  n_f        = 4                    # The number of active flavours
+  b_0        = (33 - 2*n_f)/(12*pi) # The one-loop beta function coefficient
+  beta_0     = 4*pi*b_0             # From Dr Sandapen's DGLAP Notes.pdf
+  
+  # b-SAT model parameters from Reference [3], Table 1
+  
+  A_g        = 2.308
+  lambda_g   = 0.058
+  mu_nought  = sqrt(1.51)
+  
+  # The following equations come from Gluon Density.pdf
+  
+  # Calculate the initial gluon density
+  
+  G_N_0 = function (N_in) {
+    
+    A_g*((gamma(33/5)*gamma(N_in - 1 - lambda_g))/gamma(N_in + (28/5) - lambda_g))
+    
+  }
+  
+  # Calculate the strong coupling constant to leading order
+  
+  alpha_s = function (mu_in) {
+    
+    (2*pi)/(beta_0*log(sqrt(mu_in)/Lambda_QCD))
+    
+  }
+  
+  gamma_gg = function (mu_in, N_in) {
+    
+    i = seq(from = 2, to = N_in, by = 1)
+    
+    (alpha_s(mu_in)/(4*pi))*((((N_in - 2)*(N_in + 1))/(N_in*(N_in - 1))) + (((N_in - 2)*(N_in + 5))/(6*(N_in + 1)*(N_in + 2))) + sum((2/i) + (1/9)*n_f))
+    
+  }
+  
+  gamma_gg_tilde = function(mu_in, N_in) {
+    
+    alpha_s(mu_in)/mu_in
+    
+  }
+  
+  # Calculate the evolved gluon density moment
+  
+  G_N = function (N_in) {
+    
+    G_N_0(N_in)*exp(gamma_gg(mu**2, N_in)*integrate(gamma_gg_tilde, lower = mu_nought**2, upper = mu**2, N_in)$value)
+    
+  }
+  
+  G_N = Vectorize(G_N)
+  
+  # Recover the gluon density from the gluon density moment
+  # Refer to Equation (4.4) of Reference [5]
+  
+  # Create a list P of Jacobi polynomial coefficients
+  # The coefficients are called using P[[n]][j]
+  # The number n in double brackets indicates the (n - 1)th-order polynomial (since the 1st polynomial has order 0)
+  # The number j in single brackets indicates the (j - 1)th-order term coefficient
+  # The normalized argument normalises the polynomials over [-1, 1]
+  # The jacobi.p.polynomial() function evaluates the polynomials at x
+  
+  P = jacobi.p.polynomials(N_max, alpha, beta, normalized = FALSE)
+  
+  # Create a vector Theta for the values of the polynomials evaluated at 2*x_Bj - 1
+  # Create a matrix nj in order to sum j over n
+  # Create a vector N_n of normalisation constants
+  
+  Theta = vector(mode = "numeric", length = N_max + 1)
+  nj    = matrix(0, nrow = N_max + 1, ncol = N_max + 1)
+  N_n   = vector(mode = "numeric", length = N_max + 1)
+  
+  # Normalisation constant function
+  
+  Normalise_Theta = function(x, n) {
+    
+    # Create a polynomial function from the Jacobi coefficients
+    
+    Theta_fun = as.function(P[[n]])
+    
+    (x**beta)*((1 - x)**alpha)*(Theta_fun(x)**2)
+    
+  }
+  
+  # Indexing in R begins at 1
+  # Therefore, re-index n and j to go from 1 to N_max + 1
+  # G_N(j + 2) becomes G_N(j + 1)
+  
+  for (n in seq(from = 1, to = N_max + 1, by = 1)) {
+    
+    # Recreate the polynomial function
+    
+    Theta_fun = as.function(P[[n]])
+    
+    # Calculate the normalisation constants
+    
+    N_n[n] = 1/integrate(Normalise_Theta, lower = 0, upper = 1, n)$value
+    
+    for (j in seq(from = 1, to = n, by = 1)) {
+      
+      # Sum over j in Theta
+      # Calculate matrix elements
+      
+      Theta[n] = Theta_fun(2*x_Bj - 1)
+      nj[n, j] = nj[n, j] + c(P[[n]][j])*G_N(j + 1)
+      
+    }
+    
+    # Sum over j in nj
+    # c.G is a vector of length N_max + 1 of the coefficients multiplied by the moments
+    
+    c.G = rowSums(nj)
+    
+  }
+  
+  # Multiply each c.G value with each normlisation constant and each Theta value, and sum them
+  # Multiply by the Jacobi weight function
+  # Sum over n in c.G*N_n*Theta
+  
+  (x_Bj**beta)*((1 - x_Bj)**alpha)*sum(c.G*N_n*Theta)
+  
+}
+
+G = Vectorize(memoise(G))
+
+```
+
+#Gluon Density Plots
+
+```{r}
+
+# Include all plots in the same PDF
+
+pdf("Gluon Density Plots.pdf", height = 5)
+
+# xg vs x_Bj
+
+x_seq = seq(0, 1, 0.01)
+
+plot(x_seq, G(x_seq, sqrt(40), 3, 0.5, 9), type = "l", lwd = 2, col = "orange", xlab = "x", ylab = "Gluon Density")
+
+lines(x_seq, 2.308*(x_seq**(-0.58))*((1 - x_seq)**5.6), lwd = 2, col = "blue")
+
+legend(0.73, 0.78, c("xg_0", "G", "mu^2 = 40", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, 2, NA, NA, NA, NA), col = c("blue", "orange", NA, NA, NA, NA))
+
+plot(x_seq, G(x_seq, sqrt(2), 3, 0.5, 9), type = "l", lwd = 2, col = "black", xlab = "x", ylab = "Gluon Density")
+
+lines(x_seq, G(x_seq, sqrt(20), 3, 0.5, 9), lwd = 2, lty = 2, col = "blue")
+lines(x_seq, G(x_seq, sqrt(40), 3, 0.5, 9), lwd = 2, lty = 1, col = "red")
+lines(x_seq, G(x_seq, sqrt(60), 3, 0.5, 9), lwd = 2, lty = 1, col = "purple")
+
+legend(0.73, 0.78, c("mu^2 = 2", "mu^2 = 20", "mu^2 = 40", "mu^2 = 60", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, 2, 2, 2, NA, NA, NA, NA), lty = c(1, 2, 1, 1, NA, NA, NA), col = c("black", "blue", "red", "purple", NA, NA, NA, NA))
+
+plot(x_seq, G(x_seq, sqrt(20), 3, 0.5, 20), type = "l", lwd = 2, col = "purple", xlab = "x", ylab = "Gluon Density")
+
+lines(x_seq, G(x_seq, sqrt(20), 3, 0.5, 1), lwd = 2, lty = 1, col = "black")
+lines(x_seq, G(x_seq, sqrt(20), 3, 0.5, 5), lwd = 2, lty = 2, col = "blue")
+lines(x_seq, G(x_seq, sqrt(20), 3, 0.5, 10), lwd = 2, lty = 3, col = "red")
+lines(x_seq, G(x_seq, sqrt(20), 3, 0.5, 15), lwd = 2, lty = 1, col = "green")
+
+legend(0.72, 0.81, c("mu^2 = 20", "alpha = 3", "beta = 0.5", "N_max = 1", "N_max = 5", "N_max = 10", "N_max = 15", "N_max = 20"), lwd = c(NA, NA, NA, 2, 2, 2, 2, 2), lty = c(NA, NA, NA, 1, 2, 3, 1, 1), col = c(NA, NA, NA, "black", "blue", "red", "green", "purple"))
+
+# xg vs alpha
+
+a_seq = seq(0, 30, 1)
+
+plot(a_seq, G(0.2, sqrt(2), a_seq, 0.5, 9), type = "l", lwd = 2, col = "black", xlab = "alpha", ylab = "Gluon Density")
+
+lines(a_seq, G(0.2, sqrt(20), a_seq, 0.5, 9), lwd = 2, lty = 2, col = "blue")
+lines(a_seq, G(0.2, sqrt(40), a_seq, 0.5, 9), lwd = 2, lty = 1, col = "red")
+
+legend(22, 1, c("x = 0.2", "mu^2 = 2", "mu^2 = 20", "mu^2 = 40", "beta = 0.5", "N_max = 9"), lwd = c(NA, 2, 2, 2, NA, NA), lty = c(NA, 1, 2, 1, NA, NA), col = c(NA, "black", "blue", "red", NA, NA))
+
+plot(a_seq, G(0.6, sqrt(2), a_seq, 0.5, 9), type = "l", lwd = 2, col = "black", xlab = "alpha", ylab = "Gluon Density")
+
+lines(a_seq, G(0.6, sqrt(20), a_seq, 0.5, 9), lwd = 2, lty = 2, col = "blue")
+lines(a_seq, G(0.6, sqrt(40), a_seq, 0.5, 9), lwd = 2, lty = 1, col = "red")
+
+legend(22, 2.3, c("x = 0.6", "mu^2 = 2", "mu^2 = 20", "mu^2 = 40", "beta = 0.5", "N_max = 9"), lwd = c(NA, 2, 2, 2, NA, NA), lty = c(NA, 1, 2, 1, NA, NA), col = c(NA, "black", "blue", "red", NA, NA))
+
+# xg vs beta
+
+b_seq = seq(0, 5, 0.1)
+
+plot(b_seq, G(0.2, sqrt(2), 3, b_seq, 9), type = "l", lwd = 2, col = "black", xlab = "beta", ylab = "Gluon Density")
+
+lines(b_seq, G(0.2, sqrt(20), 3, b_seq, 9), lwd = 2, lty = 2, col = "blue")
+lines(b_seq, G(0.2, sqrt(40), 3, b_seq, 9), lwd = 2, lty = 1, col = "red")
+
+legend(3.65, 0.8, c("x = 0.6", "mu^2 = 2", "mu^2 = 20", "mu^2 = 40", "alpha = 3", "N_max = 9"), lwd = c(NA, 2, 2, 2, NA, NA), lty = c(NA, 1, 2, 1, NA, NA), col = c(NA, "black", "blue", "red", NA, NA))
+
+b_seq = seq(0, 20, 1)
+
+plot(b_seq, G(0.2, sqrt(2), 30, b_seq, 9), type = "l", lwd = 2, col = "black", xlab = "beta", ylab = "Gluon Density")
+
+lines(b_seq, G(0.2, sqrt(20), 30, b_seq, 9), lwd = 2, lty = 2, col = "blue")
+lines(b_seq, G(0.2, sqrt(40), 30, b_seq, 9), lwd = 2, lty = 1, col = "red")
+
+legend(14.8, 2.4, c("x = 0.2", "mu^2 = 2", "mu^2 = 20", "mu^2 = 40", "alpha = 30", "N_max = 9"), lwd = c(NA, 2, 2, 2, NA, NA), lty = c(NA, 1, 2, 1, NA, NA), col = c(NA, "black", "blue", "red", NA, NA))
+
+# xg vs mu
+
+mu_seq = seq(sqrt(1.51), 2.5, 0.1)
+
+plot(mu_seq, G(0.01, mu_seq, 3, 0.5, 9), type = "l", lwd = 2, col = "red", xlab = "mu", ylab = "Gluon Density", ylim = c(0.03, 0.8))
+
+lines(mu_seq, G(0.2, mu_seq, 3, 0.5, 9), lwd = 2, lty = 1, col = "green")
+lines(mu_seq, G(0.6, mu_seq, 3, 0.5, 9), lwd = 2, lty = 1, col = "blue")
+lines(mu_seq, G(0.8, mu_seq, 3, 0.5, 9), lwd = 2, lty = 1, col = "magenta")
+
+legend(2.1, 0.75, c("x = 0.01", "x = 0.2", "x = 0.6", "x = 0.8", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, 2, 2, 2, NA, NA, NA), lty = c(1, 1, 1, 1, NA, NA, NA), col = c("red", "green", "blue", "magenta", NA, NA, NA), bg = "white")
+
+mu_seq = seq(sqrt(1.51), 10, 0.25)
+
+plot(mu_seq, G(0.01, mu_seq, 3, 0.5, 9), type = "l", lwd = 2, col = "red", xlab = "mu", ylab = "Gluon Density")
+
+legend(7.7, 0.23538, c("x = 0.01", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, NA, NA, NA), lty = c(1, NA, NA, NA), col = c("red", NA, NA, NA), bg = "white")
+
+plot(mu_seq, G(0.2, mu_seq, 3, 0.5, 9), type = "l", lwd = 2, col = "green", xlab = "mu", ylab = "Gluon Density")
+
+legend(7.7, 0.785, c("x = 0.2", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, NA, NA, NA), lty = c(1, NA, NA, NA), col = c("green", NA, NA, NA), bg = "white")
+
+plot(mu_seq, G(0.6, mu_seq, 3, 0.5, 9), type = "l", lwd = 2, col = "blue", xlab = "mu", ylab = "Gluon Density")
+
+legend(7.7, 0.4932, c("x = 0.6", "alpha = 3", "beta = 0.5", "N_max = 9"), lwd = c(2, NA, NA, NA), lty = c(1, NA, NA, NA), col = c("blue", NA, NA, NA), bg = "white")
+
+```
